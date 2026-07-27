@@ -426,17 +426,21 @@ def probe_pdf(data: bytes) -> dict[str, Any]:
 
 
 def build_pdf(pages: list[str], *, title: str = "Test Document") -> bytes:
-    """Create a simple text PDF. Used by tests and the sample-deck generator."""
+    """Create a simple text PDF. Used by tests and the sample-deck generator.
+
+    ``insert_textbox`` writes nothing at all when the text overflows the box,
+    which turns a dense fixture page into a silently blank one. Shrink the type
+    until the content fits so what a caller passes in is what a parser reads
+    back out.
+    """
     doc = fitz.open()
+    box = fitz.Rect(48, 48, 744, 564)
     for content in pages:
         page = doc.new_page(width=792, height=612)  # 4:3 slide-ish landscape
-        page.insert_textbox(
-            fitz.Rect(48, 48, 744, 564),
-            content,
-            fontsize=13,
-            fontname="helv",
-            align=0,
-        )
+        for fontsize in (13, 11, 9, 8, 7, 6, 5, 4):
+            # A negative return means the text did not fit and nothing was drawn.
+            if page.insert_textbox(box, content, fontsize=fontsize, fontname="helv") >= 0:
+                break
     doc.set_metadata({"title": title})
     buffer = io.BytesIO()
     doc.save(buffer)

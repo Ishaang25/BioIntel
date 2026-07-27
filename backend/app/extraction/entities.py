@@ -1,8 +1,19 @@
 """Stages 3-4: company profile and scientific entity extraction.
 
-Entities are extracted by the model and then reconciled with deterministic
-gazetteer hits (:mod:`app.extraction.lexicon`).  The reconciliation is
-asymmetric on purpose:
+Entities are extracted from **page chunks processed in parallel**, never from
+the whole deck in one call.  A 50-page deck's composite text is comfortably
+over 20k input tokens, and the entity list it produces is longer than any
+sane output budget: the single-call design reliably ran for minutes and then
+failed with a JSON parse error because the response had been cut in half.
+Chunking bounds both sides of that -- input per call and output per call --
+and turns one long serial call into several short concurrent ones.
+
+Chunks are merged afterwards.  Because the same target is named on many
+slides, cross-chunk deduplication is not an optimisation but a correctness
+requirement: without it every mention becomes its own entity.
+
+Extracted entities are then reconciled with deterministic gazetteer hits
+(:mod:`app.extraction.lexicon`).  The reconciliation is asymmetric on purpose:
 
 * a model entity confirmed by the gazetteer gains confidence;
 * a gazetteer hit the model missed is added as a low-confidence candidate,
@@ -14,6 +25,7 @@ asymmetric on purpose:
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -24,7 +36,7 @@ from app.extraction import lexicon
 from app.llm import prompts
 from app.llm.client import LLMClient
 from app.llm.schemas import CompanyProfileOut, EntityExtractionOut, ExtractedEntity
-from app.utils.chunking import render_pages_for_prompt
+from app.utils.chunking import PageChunk, chunk_pages, render_pages_for_prompt
 from app.utils.text import normalize_entity_key, truncate
 
 log = get_logger(__name__)
@@ -33,6 +45,10 @@ log = get_logger(__name__)
 BACKSTOP_CONFIDENCE = 0.35
 #: Confidence bonus when model and gazetteer agree.
 CORROBORATION_BONUS = 0.12
+
+
+class EntityChunkError(Exception):
+    """A chunk could not be extracted even after being split."""
 
 
 @dataclass(slots=True)
@@ -71,6 +87,11 @@ class EntityExtractionResult:
     entities: list[ResolvedEntity] = field(default_factory=list)
     model_count: int = 0
     backstop_added: int = 0
+    chunks: int = 0
+    chunk_failures: int = 0
+    chunk_retries: int = 0
+    duplicates_merged: int = 0
+    max_chunk_input_tokens: int = 0
 
     def metrics(self) -> dict[str, Any]:
         by_type: dict[str, int] = {}
@@ -80,6 +101,11 @@ class EntityExtractionResult:
             "entities": len(self.entities),
             "from_model": self.model_count,
             "added_by_backstop": self.backstop_added,
+            "chunks": self.chunks,
+            "chunk_failures": self.chunk_failures,
+            "chunk_retries": self.chunk_retries,
+            "duplicates_merged": self.duplicates_merged,
+            "max_chunk_input_tokens": self.max_chunk_input_tokens,
             "by_type": by_type,
         }
 
@@ -94,6 +120,8 @@ class EntityExtractionResult:
 
 
 class EntityExtractionStage:
+    """Extract entities chunk by chunk, in parallel, then merge."""
+
     def __init__(self, llm: LLMClient) -> None:
         self.llm = llm
 
@@ -102,24 +130,49 @@ class EntityExtractionStage:
         if not usable:
             return EntityExtractionResult()
 
-        output = await self.llm.structured(
-            purpose="entities",
-            stage="entities",
-            system=prompts.system(),
-            user=prompts.render(
-                "entities", pages=render_pages_for_prompt(usable, per_page_limit=4000)
-            ),
-            schema=EntityExtractionOut,
-            model=settings.model_reasoning,
-            context={"pages": usable},
+        chunks = chunk_pages(
+            usable,
+            max_tokens=settings.extraction_chunk_input_tokens,
+            max_pages_per_chunk=settings.extraction_chunk_max_pages,
+            overlap=0,  # entities are merged by name, so context bleed buys nothing
+        )
+        log.info(
+            "entities.start",
+            pages=len(usable),
+            chunks=len(chunks),
+            max_chunk_tokens=max((c.token_estimate for c in chunks), default=0),
         )
 
+        outcomes = await asyncio.gather(
+            *(self._extract_chunk(chunk) for chunk in chunks), return_exceptions=True
+        )
+
+        extracted: list[tuple[ExtractedEntity, PageChunk]] = []
+        failures = 0
+        retries = 0
+        for chunk, outcome in zip(chunks, outcomes, strict=True):
+            if isinstance(outcome, BaseException):
+                failures += 1
+                log.warning(
+                    "entities.chunk_failed",
+                    chunk=chunk.index,
+                    pages=chunk.page_numbers,
+                    error=str(outcome)[:300],
+                )
+                continue
+            entities, chunk_retries = outcome
+            retries += chunk_retries
+            extracted.extend((entity, chunk) for entity in entities)
+
         resolved: dict[tuple[EntityType, str], ResolvedEntity] = {}
-        for extracted in output.entities:
-            entity = _from_model(extracted)
+        merged = 0
+        for item, chunk in extracted:
+            entity = _from_model(item, chunk)
             key = (entity.entity_type, entity.normalized_key)
-            if key in resolved:
-                resolved[key].merge(entity)
+            existing = resolved.get(key) or _find_by_alias_or_name(resolved, entity)
+            if existing is not None:
+                existing.merge(entity)
+                merged += 1
             else:
                 resolved[key] = entity
         model_count = len(resolved)
@@ -130,10 +183,77 @@ class EntityExtractionStage:
         entities.sort(key=lambda e: e.salience, reverse=True)
 
         result = EntityExtractionResult(
-            entities=entities, model_count=model_count, backstop_added=backstop_added
+            entities=entities,
+            model_count=model_count,
+            backstop_added=backstop_added,
+            chunks=len(chunks),
+            chunk_failures=failures,
+            chunk_retries=retries,
+            duplicates_merged=merged,
+            max_chunk_input_tokens=max((c.token_estimate for c in chunks), default=0),
         )
         log.info("entities.completed", **result.metrics())
         return result
+
+    # ------------------------------------------------------------ internal ---
+    async def _extract_chunk(self, chunk: PageChunk) -> tuple[list[ExtractedEntity], int]:
+        """Extract one chunk, splitting and retrying it alone if it fails.
+
+        Only the failed chunk is re-sent -- never the whole document.  A chunk
+        that overflowed its output budget is halved before the retry, because
+        asking the same question again gets the same oversized answer.
+        """
+        try:
+            return list(await self._call(chunk)), 0
+        except Exception as exc:
+            halves = chunk.split()
+            if not halves:
+                raise
+            log.warning(
+                "entities.chunk_retrying_split",
+                chunk=chunk.index,
+                pages=chunk.page_numbers,
+                error=str(exc)[:200],
+            )
+
+        recovered: list[ExtractedEntity] = []
+        retries = 0
+        results = await asyncio.gather(
+            *(self._call(half) for half in halves), return_exceptions=True
+        )
+        for half, outcome in zip(halves, results, strict=True):
+            retries += 1
+            if isinstance(outcome, BaseException):
+                log.warning(
+                    "entities.chunk_retry_failed",
+                    chunk=chunk.index,
+                    pages=half.page_numbers,
+                    error=str(outcome)[:200],
+                )
+                continue
+            recovered.extend(outcome)
+        if not recovered:
+            raise EntityChunkError(
+                f"Entity extraction failed for pages {chunk.page_numbers} after splitting."
+            )
+        return recovered, retries
+
+    async def _call(self, chunk: PageChunk) -> list[ExtractedEntity]:
+        output = await self.llm.structured(
+            purpose="entities",
+            stage="entities",
+            system=prompts.system(),
+            user=prompts.render(
+                "entities", pages=render_pages_for_prompt(chunk.pages, per_page_limit=4000)
+            ),
+            schema=EntityExtractionOut,
+            model=settings.model_extraction,
+            max_output_tokens=settings.extraction_chunk_output_tokens,
+            reasoning_effort=settings.llm_extraction_reasoning_effort,
+            enforce_input_budget=True,
+            context={"pages": chunk.pages},
+        )
+        return list(output.entities)
 
     def _apply_backstop(
         self,
@@ -204,7 +324,13 @@ _TYPE_SALIENCE = {
 }
 
 
-def _from_model(extracted: ExtractedEntity) -> ResolvedEntity:
+def _from_model(extracted: ExtractedEntity, chunk: PageChunk | None = None) -> ResolvedEntity:
+    pages = [p for p in extracted.source_pages if p]
+    if chunk is not None:
+        # A chunk only ever sees its own pages; a citation outside them is a
+        # mis-numbering, and no citation at all is attributed to the chunk.
+        in_chunk = set(chunk.page_numbers)
+        pages = [p for p in pages if p in in_chunk] or chunk.page_numbers[:1]
     return ResolvedEntity(
         entity_type=extracted.entity_type,
         name=extracted.name,
@@ -213,10 +339,36 @@ def _from_model(extracted: ExtractedEntity) -> ResolvedEntity:
         aliases=list(extracted.aliases),
         description=extracted.description,
         role_in_program=extracted.role_in_program,
-        source_pages=list(extracted.source_pages),
+        source_pages=pages,
         confidence=extracted.confidence,
         mention_count=1,
     )
+
+
+def _surface_keys(entity: ResolvedEntity) -> set[str]:
+    keys = {entity.normalized_key, normalize_entity_key(entity.name)}
+    keys.update(normalize_entity_key(a) for a in entity.aliases)
+    if entity.canonical_name:
+        keys.add(normalize_entity_key(entity.canonical_name))
+    return {k for k in keys if k}
+
+
+def _find_by_alias_or_name(
+    resolved: dict[tuple[EntityType, str], ResolvedEntity], candidate: ResolvedEntity
+) -> ResolvedEntity | None:
+    """Match an entity from one chunk against one already seen in another.
+
+    Chunks are extracted independently, so the same target arrives as "KRAS"
+    from one chunk and "K-ras" from the next.  Any shared surface form -- name,
+    canonical name or alias -- identifies them as the same entity.
+    """
+    keys = _surface_keys(candidate)
+    for (entity_type, _), entity in resolved.items():
+        if entity_type is not candidate.entity_type:
+            continue
+        if keys & _surface_keys(entity):
+            return entity
+    return None
 
 
 def _find_by_alias(
@@ -272,10 +424,12 @@ class CompanyProfileStage:
             stage="profile",
             system=prompts.system(),
             user=prompts.render(
-                "company_profile", pages=render_pages_for_prompt(selected, per_page_limit=5000)
+                "company_profile", pages=render_pages_for_prompt(selected, per_page_limit=3000)
             ),
             schema=CompanyProfileOut,
             model=settings.model_fast,
+            max_output_tokens=settings.extraction_chunk_output_tokens,
+            reasoning_effort=settings.llm_extraction_reasoning_effort,
             context={
                 "document_text": truncate(document_text, 40_000),
                 "first_page_text": usable[0].get("text", ""),
@@ -285,14 +439,18 @@ class CompanyProfileStage:
 
 
 def _profile_pages(
-    pages: list[dict[str, Any]], *, head: int = 6, tail: int = 5
+    pages: list[dict[str, Any]], *, head: int = 6, tail: int = 5, max_pages: int = 16
 ) -> list[dict[str, Any]]:
     if len(pages) <= head + tail:
         return pages
     selected = pages[:head] + pages[-tail:]
-    # Keep any middle page that looks like a pipeline or team slide.
+    # Keep any middle page that looks like a pipeline or team slide, up to a
+    # cap: on a long deck an unbounded keyword sweep quietly rebuilds the
+    # whole-document prompt this stage exists to avoid.
     keywords = ("pipeline", "team", "leadership", "founders", "milestones", "financing", "the ask")
     for page in pages[head:-tail]:
+        if len(selected) >= max_pages:
+            break
         haystack = ((page.get("slide_title") or "") + " " + (page.get("text") or "")[:400]).lower()
         if any(keyword in haystack for keyword in keywords):
             selected.append(page)

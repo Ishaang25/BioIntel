@@ -191,6 +191,11 @@ class PageUnderstandingStage:
             schema=PageUnderstandingOut,
             model=settings.model_vision,
             images=images,
+            # One page, one budget. Without a cap a page the model finds
+            # confusing consumes the global 16k output allowance and minutes
+            # of wall clock, while the pages behind it wait for a slot.
+            max_output_tokens=settings.vision_max_output_tokens,
+            reasoning_effort=settings.vision_reasoning_effort,
             context={
                 "page_number": page.page_number,
                 "page_text": page.text,

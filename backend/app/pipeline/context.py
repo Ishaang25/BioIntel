@@ -80,11 +80,30 @@ class RunContext:
 
     # -- bookkeeping -------------------------------------------------------
     stage_metrics: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: Wall-clock duration of each stage, in the order they ran. This is the
+    #: profile: it answers "where did the two minutes go?" without a debugger.
+    stage_timings: list[dict[str, Any]] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     degraded: bool = False
 
     def record(self, stage: PipelineStage, metrics: dict[str, Any]) -> None:
         self.stage_metrics[stage.value] = metrics
+
+    def record_timing(
+        self, stage: PipelineStage, duration_ms: int, *, status: str, llm: dict[str, Any]
+    ) -> None:
+        self.stage_timings.append(
+            {
+                "stage": stage.value,
+                "status": status,
+                "duration_ms": duration_ms,
+                "llm": llm,
+            }
+        )
+
+    @property
+    def total_duration_ms(self) -> int:
+        return sum(int(t["duration_ms"]) for t in self.stage_timings)
 
     def warn(self, message: str) -> None:
         if message not in self.warnings:

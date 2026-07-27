@@ -65,6 +65,10 @@ class Settings(BaseSettings):
     model_fast: str = "gpt-5-mini"
     #: Multimodal page understanding (charts, diagrams, scanned pages).
     model_vision: str = "gpt-5"
+    #: Entity extraction over small page chunks. This is a recognition task
+    #: against a fixed type list, not a reasoning one, and it runs once per
+    #: chunk -- the fast model is both quicker and materially cheaper here.
+    model_extraction: str = "gpt-5-mini"
     model_embedding: str = "text-embedding-3-small"
     embedding_dimensions: int = 1536
 
@@ -73,10 +77,41 @@ class Settings(BaseSettings):
     llm_max_output_tokens: int = 16000
     #: Reasoning effort for models that support it ("minimal" | "low" | "medium" | "high").
     llm_reasoning_effort: str = "medium"
+    #: Effort for mechanical extraction over a handful of pages. Deliberately
+    #: lower than the default: extended reasoning adds latency without adding
+    #: recall when the task is "list what is named on these pages".
+    llm_extraction_reasoning_effort: str = "low"
     #: Hard ceiling on total LLM calls for a single analysis run (cost guard).
     llm_max_calls_per_run: int = 400
     #: Concurrency limit for parallel LLM calls.
-    llm_concurrency: int = 6
+    llm_concurrency: int = 12
+
+    # ------------------------------------------------------- call budgets ---
+    #: Ceiling on the input side of any single model call. Prompts above this
+    #: are logged as a defect; the chunked extraction stages treat them as a
+    #: hard error. A single oversized call is slower and less accurate than
+    #: several small ones run in parallel.
+    llm_max_input_tokens: int = 20_000
+    #: Target input size for one extraction chunk, leaving headroom under
+    #: ``llm_max_input_tokens`` for the prompt template and system message.
+    extraction_chunk_input_tokens: int = 12_000
+    #: Pages per extraction chunk. Small enough that the output of one call
+    #: cannot approach the output-token ceiling, large enough that a claim
+    #: and its caveat on the following slide stay in the same call.
+    extraction_chunk_max_pages: int = 8
+    #: Output ceiling for one extraction chunk. Reaching it means the chunk
+    #: was too big; the stage splits and retries rather than losing the chunk.
+    extraction_chunk_output_tokens: int = 6_000
+    #: Output ceiling for reading one page. A page transcription plus its
+    #: chart values does not need the global 16k budget, and allowing it
+    #: lets a single confused page burn minutes of wall clock.
+    vision_max_output_tokens: int = 6_000
+    #: Reasoning effort for page reading. Transcribing a slide and naming what
+    #: a chart shows is mostly perception; on a 25-page deck the default
+    #: effort cost ~57 seconds per page, which no amount of concurrency brings
+    #: inside a two-minute budget. Raise this to "medium" if chart-value
+    #: recovery on dense figures matters more than turnaround time.
+    vision_reasoning_effort: str = "low"
 
     # --------------------------------------------------------- retrieval ---
     ncbi_api_key: str | None = None

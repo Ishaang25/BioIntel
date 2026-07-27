@@ -99,6 +99,25 @@ class LLMSchemaError(LLMError):
     message = "The language model returned output that did not satisfy the schema."
 
 
+class LLMTruncatedError(LLMSchemaError):
+    """The model ran out of output budget mid-JSON.
+
+    Distinct from a schema violation because the remedy is different: resending
+    the same prompt produces the same truncation.  The caller must ask for less
+    (a smaller chunk) rather than ask again.
+    """
+
+    code = "llm_truncated"
+    message = "The language model's response was cut off before the JSON was complete."
+
+
+class LLMInputTooLarge(LLMError):
+    """A request exceeded the per-call input budget before it was sent."""
+
+    code = "llm_input_too_large"
+    message = "The prompt exceeded the per-call input-token budget."
+
+
 class LLMBudgetExceeded(LLMError):
     code = "llm_budget_exceeded"
     message = "The analysis exceeded its language-model call budget."

@@ -103,8 +103,18 @@ class ClaimExtractionStage:
             log.warning("claims.no_text")
             return ClaimExtractionResult()
 
-        chunks = chunk_pages(usable, max_chars=24_000, overlap=1)
-        log.info("claims.start", pages=len(usable), batches=len(chunks))
+        chunks = chunk_pages(
+            usable,
+            max_tokens=settings.extraction_chunk_input_tokens,
+            max_pages_per_chunk=settings.extraction_chunk_max_pages,
+            overlap=1,
+        )
+        log.info(
+            "claims.start",
+            pages=len(usable),
+            batches=len(chunks),
+            max_chunk_tokens=max((c.token_estimate for c in chunks), default=0),
+        )
 
         outcomes = await asyncio.gather(
             *(self._extract_chunk(chunk.pages, max_claims=max_claims) for chunk in chunks),
@@ -149,6 +159,11 @@ class ClaimExtractionStage:
             user=user,
             schema=ClaimExtractionOut,
             model=settings.model_reasoning,
+            # A chunk of a handful of pages cannot honestly yield more than
+            # this; reaching the ceiling means the response was cut off, which
+            # is what turns a slow call into an unparseable one.
+            max_output_tokens=settings.extraction_chunk_output_tokens,
+            enforce_input_budget=True,
             context={"pages": pages, "max_claims": max_claims},
         )
         return list(output.claims)

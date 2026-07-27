@@ -57,8 +57,8 @@ produced up to that point.
 | 1 | `parse` | Text layer, positioned blocks, tables, page classification, rasterisation of pages needing vision | **fatal** |
 | 2 | `page_understanding` | Vision pass over scanned/graphical pages: transcription, chart values, figure descriptions | degrading |
 | 3 | `profile` | Company, lead programme, indication, modality, pipeline, team, ask | degrading |
-| 4 | `entities` | Diseases, targets, drugs, biomarkers, mechanisms, modalities, endpoints — model output reconciled with a deterministic gazetteer | degrading |
-| 5 | `claims` | Claim extraction with verbatim quotes, then **quote verification**, deduplication, importance ranking | **fatal** |
+| 4 | `entities` | Diseases, targets, drugs, biomarkers, mechanisms, modalities, endpoints — extracted from **parallel page chunks**, merged across chunks, then reconciled with a deterministic gazetteer | degrading |
+| 5 | `claims` | Claim extraction from parallel page chunks with verbatim quotes, then **quote verification**, deduplication, importance ranking | **fatal** |
 | 6 | `retrieval` | Per-claim query planning, fan-out to three sources, cross-source dedupe, relevance + quality ranking | degrading |
 | 7 | `adjudication` | Batched claim × evidence stance judgements with abstract-quote verification | degrading |
 | 8 | `assessment` | Authoritative verification, corroboration resolution, deterministic scoring, the IC scorecard, per-claim verdicts | degrading |
@@ -415,10 +415,35 @@ in the memo's own text.
 
 Structured logs (`structlog`) with `run_id`/`document_id`/`request_id` bound to
 context, so a run's whole lifecycle is greppable. Every model call is written
-to `llm_call_logs` with tokens, latency, attempts and estimated cost. Every
-stage records duration and domain metrics (`claims`, `dropped_unverifiable`,
-`by_stance`, `quote_verification_failures`, …) on `RunStage.metrics` and, in
-aggregate, on `AnalysisRun.metrics` — exposed at `GET /runs/{id}/metrics`.
+to `llm_call_logs` **and** to an `llm.call` log line with input tokens, output
+tokens, reasoning tokens, latency, retries, truncation and estimated cost, keyed
+by stage and purpose. Every stage records duration and domain metrics (`claims`,
+`dropped_unverifiable`, `by_stance`, `quote_verification_failures`, …) plus its
+own LLM roll-up on `RunStage.metrics` and, in aggregate, on
+`AnalysisRun.metrics` — exposed at `GET /runs/{id}/metrics`. A run ends with a
+single `pipeline.profile` line naming the slowest stage.
+
+To read a run's profile:
+
+```
+python -m app.scripts.profile_run [run_id] [--calls]
+```
+
+That table is how the entity-extraction bottleneck was diagnosed: one call,
+542 seconds, 21,871 input tokens, output pinned at exactly the 16,000-token
+ceiling — the signature of a truncated response, not a malformed one.
+
+### Per-call budgets
+
+No single call may carry a whole document. `LLM_MAX_INPUT_TOKENS` (20k) is a
+warning threshold for every call and a hard error for the chunked extraction
+stages, and `llm.input_budget_exceeded` fires before the request is sent.
+Entity and claim extraction split the deck into 8-page, ~12k-token chunks
+processed concurrently; a chunk whose answer overflows the output budget is
+**split and retried alone**, never the whole document. A response cut off
+mid-JSON is salvaged to its last complete element (`app.llm.json_repair`)
+rather than discarded, because resending the same prompt truncates at the same
+place.
 
 ---
 

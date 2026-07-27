@@ -165,6 +165,7 @@ class AnalysisPipeline:
                 self._check_cancelled()
                 await self._execute(stage, context, document)
             _mark_finished(run_id, context, self.llm)
+            _log_profile(context, self.llm)
             log.info("pipeline.succeeded", **_summary(context))
         except CancelledError:
             _mark_cancelled(run_id)
@@ -172,10 +173,12 @@ class AnalysisPipeline:
             raise
         except BioIntelError as exc:
             _mark_failed(run_id, exc.code, exc.message, context, self.llm)
+            _log_profile(context, self.llm)
             log.error("pipeline.failed", code=exc.code, error=exc.message)
             raise
         except Exception as exc:  # pragma: no cover - defensive
             _mark_failed(run_id, "internal_error", str(exc)[:500], context, self.llm)
+            _log_profile(context, self.llm)
             log.exception("pipeline.crashed")
             raise PipelineError(f"The analysis pipeline crashed: {exc}", cause=exc) from exc
         finally:
@@ -198,6 +201,7 @@ class AnalysisPipeline:
     async def _execute(self, stage: PipelineStage, context: RunContext, document: Document) -> None:
         handler = getattr(self, f"_stage_{stage.value}")
         started = dt.datetime.now(dt.UTC)
+        before = self._llm_snapshot(stage)
         _update_stage(context.run_id, stage, StageStatus.RUNNING, started_at=started)
         _update_run_stage(context.run_id, stage, _progress_before(stage))
         log.info("stage.start", stage=stage.value)
@@ -209,6 +213,8 @@ class AnalysisPipeline:
         except Exception as exc:
             duration = _elapsed_ms(started)
             message = str(exc)[:1000]
+            llm_delta = self._llm_delta(stage, before)
+            context.record_timing(stage, duration, status="failed", llm=llm_delta)
             _update_stage(
                 context.run_id,
                 stage,
@@ -216,12 +222,24 @@ class AnalysisPipeline:
                 finished_at=dt.datetime.now(dt.UTC),
                 duration_ms=duration,
                 error=message,
-                metrics=context.stage_metrics.get(stage.value, {}),
+                metrics={**context.stage_metrics.get(stage.value, {}), "llm": llm_delta},
             )
             if stage in FATAL_STAGES:
-                log.error("stage.failed_fatal", stage=stage.value, error=message)
+                log.error(
+                    "stage.failed_fatal",
+                    stage=stage.value,
+                    duration_ms=duration,
+                    error=message,
+                    **llm_delta,
+                )
                 raise
-            log.warning("stage.failed_degrading", stage=stage.value, error=message)
+            log.warning(
+                "stage.failed_degrading",
+                stage=stage.value,
+                duration_ms=duration,
+                error=message,
+                **llm_delta,
+            )
             context.warn(
                 f"The '{stage.value}' stage failed ({type(exc).__name__}); the report was "
                 "produced without it."
@@ -229,18 +247,53 @@ class AnalysisPipeline:
             return
 
         duration = _elapsed_ms(started)
+        llm_delta = self._llm_delta(stage, before)
+        context.record_timing(stage, duration, status="succeeded", llm=llm_delta)
         _update_stage(
             context.run_id,
             stage,
             StageStatus.SUCCEEDED,
             finished_at=dt.datetime.now(dt.UTC),
             duration_ms=duration,
-            metrics=context.stage_metrics.get(stage.value, {}),
+            metrics={**context.stage_metrics.get(stage.value, {}), "llm": llm_delta},
         )
         _update_run_stage(context.run_id, stage, _progress_after(stage))
         if self._on_progress:
             self._on_progress(stage, _progress_after(stage))
-        log.info("stage.done", stage=stage.value, duration_ms=duration)
+        log.info("stage.done", stage=stage.value, duration_ms=duration, **llm_delta)
+
+    # ------------------------------------------------------- instrumentation ---
+    def _llm_snapshot(self, stage: PipelineStage) -> dict[str, Any]:
+        """Copy the stage's LLM counters so the stage's own cost can be diffed."""
+        if self.llm is None:
+            return {}
+        return dict(self.llm.metrics.stage(stage.value).to_dict())
+
+    def _llm_delta(self, stage: PipelineStage, before: dict[str, Any]) -> dict[str, Any]:
+        """What this stage spent, isolated from every other stage's calls."""
+        if self.llm is None:
+            return {}
+        after = self.llm.metrics.stage(stage.value).to_dict()
+        delta = {
+            key: after.get(key, 0) - before.get(key, 0)
+            for key in (
+                "calls",
+                "failed_calls",
+                "repairs",
+                "salvaged",
+                "truncated",
+                "provider_retries",
+                "latency_ms_total",
+                "input_tokens",
+                "output_tokens",
+            )
+        }
+        delta["input_tokens_max"] = after.get("input_tokens_max", 0)
+        delta["latency_ms_max"] = after.get("latency_ms_max", 0)
+        delta["estimated_cost_usd"] = round(
+            after.get("estimated_cost_usd", 0.0) - before.get("estimated_cost_usd", 0.0), 6
+        )
+        return delta
 
     # ============================================================ stages ===
     async def _stage_parse(self, context: RunContext, document: Document) -> None:
@@ -1649,9 +1702,34 @@ def _mark_cancelled(run_id: str) -> None:
         run.finished_at = dt.datetime.now(dt.UTC)
 
 
+def _log_profile(context: RunContext, llm: LLMClient | None) -> None:
+    """Emit the per-stage timing profile as one structured line.
+
+    Deliberately a single record: a profile split across ten log lines is a
+    profile nobody reads. ``slowest_stage`` is what a regression alert keys on.
+    """
+    timings = sorted(context.stage_timings, key=lambda t: t["duration_ms"], reverse=True)
+    log.info(
+        "pipeline.profile",
+        total_ms=context.total_duration_ms,
+        wall_ms=_elapsed_ms(context.started_at),
+        slowest_stage=(timings[0]["stage"] if timings else None),
+        slowest_stage_ms=(timings[0]["duration_ms"] if timings else 0),
+        stages={t["stage"]: t["duration_ms"] for t in context.stage_timings},
+        llm_calls=(llm.metrics.calls if llm else 0),
+        llm_latency_ms=(llm.metrics.latency_ms if llm else 0),
+        llm_truncated=(llm.metrics.truncated if llm else 0),
+        llm_salvaged=(llm.metrics.salvaged if llm else 0),
+        llm_over_input_budget=(llm.metrics.over_input_budget if llm else 0),
+        max_input_tokens=(llm.metrics.max_input_tokens_seen if llm else 0),
+        estimated_cost_usd=(round(llm.metrics.cost_usd, 6) if llm else 0.0),
+    )
+
+
 def _run_metrics(context: RunContext, llm: LLMClient) -> dict[str, Any]:
     return {
         "stages": context.stage_metrics,
+        "timings": context.stage_timings,
         "llm": llm.metrics.to_dict(),
         "degraded": context.degraded,
         "warnings": context.warnings,
