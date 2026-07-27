@@ -153,13 +153,21 @@ def split_sentences(text: str) -> list[str]:
     return [s.strip() for s in _SENTENCE_RE.split(text) if s.strip()]
 
 
+#: A period that is not a decimal point (kept so "3.2 nM" survives intact).
+_NON_DECIMAL_PERIOD_RE = re.compile(r"(?<!\d)\.|\.(?!\d)")
+
+
 def normalize_entity_key(name: str) -> str:
     """Deduplication key for entity names.
 
     Case-folds, strips punctuation and common decorations so that
-    ``"KRAS G12C"``, ``"KRAS-G12C"`` and ``"kras g12c"`` collapse together.
+    ``"KRAS G12C"``, ``"KRAS-G12C"`` and ``"kras g12c"`` collapse together,
+    and so that ``"Moderna, Inc."`` matches ``"Moderna Inc"``. Decimal points
+    are preserved because entity names legitimately contain them (``IL-1.5``,
+    and values carried alongside names).
     """
     key = normalize_for_match(name)
     key = re.sub(r"\b(the|a|an)\b", " ", key)
     key = re.sub(r"[-_/]+", " ", key)
+    key = _NON_DECIMAL_PERIOD_RE.sub(" ", key)
     return _WS_RE.sub(" ", key).strip()

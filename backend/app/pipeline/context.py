@@ -7,9 +7,12 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.analysis.adjudicator import ClaimAdjudication
+from app.analysis.corroboration import CorroborationAssessment
 from app.analysis.questions import RiskQuestionResult
 from app.analysis.rules import ClaimContext
+from app.analysis.scorecard import Scorecard
 from app.analysis.scoring import ClaimScore, ClaimScoringInput, OverallScore
+from app.analysis.verification import VerificationResult
 from app.core.enums import PipelineStage
 from app.evidence.retriever import RetrievalResult
 from app.extraction.claims import ClaimExtractionResult
@@ -56,11 +59,19 @@ class RunContext:
     evidence_ids: dict[str, str] = field(default_factory=dict)
 
     # -- assessment --------------------------------------------------------
+    #: Authoritative verification outcomes, keyed by claim id.
+    verifications: dict[str, VerificationResult] = field(default_factory=dict)
+    #: What the evidence establishes about each claim, before scoring.
+    corroborations: dict[str, CorroborationAssessment] = field(default_factory=dict)
     claim_scores: dict[str, ClaimScore] = field(default_factory=dict)
     claim_inputs: dict[str, ClaimScoringInput] = field(default_factory=dict)
     verdicts: dict[str, ClaimVerdictOut] = field(default_factory=dict)
     claim_contexts: list[ClaimContext] = field(default_factory=list)
     overall: OverallScore | None = None
+    #: The multi-dimensional IC scorecard.
+    scorecard: Scorecard | None = None
+    #: VC-style scientific reasoning over the thesis.
+    scientific_assessment: Any | None = None
 
     # -- questions & report ------------------------------------------------
     risks_questions: RiskQuestionResult | None = None

@@ -32,6 +32,8 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.enums import (
     ClaimCategory,
+    ClaimType,
+    CorroborationStatus,
     CredibilityBand,
     EntityType,
     EvidenceSource,
@@ -347,6 +349,10 @@ class Claim(Base):
     #: True when the quote originated from a vision reading of a chart/scan.
     from_visual: Mapped[bool] = mapped_column(Boolean, default=False)
 
+    #: What kind of assertion this is; drives verification and scoring.
+    claim_type: Mapped[ClaimType] = mapped_column(
+        EnumType(ClaimType, 48), default=ClaimType.OTHER, index=True
+    )
     category: Mapped[ClaimCategory] = mapped_column(
         EnumType(ClaimCategory, 48), default=ClaimCategory.OTHER
     )
@@ -498,6 +504,23 @@ class ClaimAssessment(Base):
     credibility_band: Mapped[CredibilityBand] = mapped_column(
         EnumType(CredibilityBand, 32), default=CredibilityBand.UNSUPPORTED
     )
+    #: What the evidence established. Distinguishes "nothing found" from
+    #: "evidence disagrees" -- the distinction the score depends on.
+    corroboration_status: Mapped[CorroborationStatus] = mapped_column(
+        EnumType(CorroborationStatus, 40),
+        default=CorroborationStatus.INSUFFICIENT_EVIDENCE,
+        index=True,
+    )
+    corroboration_rationale: Mapped[str] = mapped_column(Text, default="")
+    #: False when the claim is excluded from credibility scoring by type.
+    is_scorable: Mapped[bool] = mapped_column(Boolean, default=True)
+    #: Plain-language account of how the score was reached.
+    score_explanation: Mapped[str] = mapped_column(Text, default="")
+    #: Authoritative verification, when one was attempted.
+    verification_status: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    verification_source: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    verification_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    verification_identifiers: Mapped[list[str]] = mapped_column(StringList, default=list)
     #: 0-1 confidence in the assessment itself (evidence volume/consistency).
     confidence: Mapped[float] = mapped_column(Float, default=0.0)
 
@@ -585,6 +608,11 @@ class Report(Base, TimestampMixin):
     confidence: Mapped[float] = mapped_column(Float, default=0.0)
     recommendation: Mapped[str] = mapped_column(Text, default="")
     score_breakdown: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
+    #: The multi-dimensional IC scorecard: ten dimensions, each with drivers.
+    scorecard: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
+    #: VC-style scientific reasoning (plausibility, precedent, differentiation).
+    scientific_assessment: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
+    ic_recommendation: Mapped[str | None] = mapped_column(String(48), nullable=True)
     citations: Mapped[list[dict[str, Any]]] = mapped_column(JSONType, default=list)
     markdown: Mapped[str] = mapped_column(Text, default="")
     limitations: Mapped[list[str]] = mapped_column(StringList, default=list)

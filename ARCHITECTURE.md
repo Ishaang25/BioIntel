@@ -61,7 +61,7 @@ produced up to that point.
 | 5 | `claims` | Claim extraction with verbatim quotes, then **quote verification**, deduplication, importance ranking | **fatal** |
 | 6 | `retrieval` | Per-claim query planning, fan-out to three sources, cross-source dedupe, relevance + quality ranking | degrading |
 | 7 | `adjudication` | Batched claim × evidence stance judgements with abstract-quote verification | degrading |
-| 8 | `assessment` | Deterministic credibility scoring plus per-claim narrative verdicts | degrading |
+| 8 | `assessment` | Authoritative verification, corroboration resolution, deterministic scoring, the IC scorecard, per-claim verdicts | degrading |
 | 9 | `questions` | Deterministic rule findings merged with model-generated risks and diligence questions | degrading |
 | 10 | `report` | IC memo synthesis, citation resolution, Markdown/HTML rendering | degrading |
 
@@ -120,42 +120,141 @@ writes one — it writes a reference id that must already exist.
 
 ### 4.4 Deterministic scoring
 
-The model contributes per-item judgements (stance, relevance, strength).
-All aggregation is fixed arithmetic in `app/analysis/scoring.py`:
+The model contributes per-item judgements (stance, relevance, strength). All
+aggregation is fixed arithmetic in `app/analysis/scoring.py`, and every score
+ships with the components that produced it.
+
+**This model was rewritten after a review of a Moderna JPM deck**, which the
+first version scored at **24.1/100, "unsupported"** — a company with approved
+products, published clinical data and active registered Phase 3 programmes. The
+cause was structural, not a tuning error: the scorer asked one question of every
+claim — *what experiment does the deck describe?* — and scored zero for anything
+that described none. An FDA approval describes no experiment, so it scored
+27.5/100, **identical to a marketing slogan**.
+
+The current model rests on three principles.
+
+#### 1. Claim type decides the scoring model
+
+`app/analysis/claim_policy.py` declares, per claim type: how it can be checked
+at all, whether it belongs in a credibility score, the prior a well-formed
+claim of that type deserves, and how far evidence can move it.
+
+| Claim type | Prior | Evidence leverage | Null result means |
+|---|---|---|---|
+| `regulatory_approval` | 0.82 | 0.35 | not independently verified |
+| `partnership` | 0.70 | 0.45 | not independently verified |
+| `pipeline_stage` | 0.70 | 0.55 | not independently verified |
+| `regulatory_submission` | 0.68 | 0.30 | not independently verified |
+| `clinical_result` | 0.45 | 0.80 | insufficient evidence |
+| `preclinical_result` | 0.38 | 0.65 | insufficient evidence |
+| `mechanism` | 0.35 | 0.85 | insufficient evidence |
+| `track_record` | 0.35 | 0.40 | not independently verified |
+| `marketing`, `corporate_vision`, `forward_looking`, `financial_guidance`, `strategic_objective`, `market_estimate` | — | — | **excluded from scoring** |
+
+An approval is a public matter of record a company cannot misstate without
+legal exposure, so it starts high and evidence barely moves it. A mechanistic
+hypothesis must be earned from data, so it starts low and is almost entirely
+decided by evidence. A plan cannot be true or false today, so it is reported
+and never scored — a company is not marked down for having a strategy.
+
+#### 2. Absence of evidence is never evidence against
+
+Corroboration (`app/analysis/corroboration.py`) is computed **separately from
+scoring**, because the old model conflated two different questions: *what did
+we find?* and *how credible is the claim?*
 
 ```
-internal  = tier_weight(claimed_evidence_tier) × (0.55 + 0.45 × rigor)
-            × hedging_penalty × quote_penalty
-
-support   = Σ weighted_strength(supporting) + 0.5 × Σ weighted_strength(mixed)
-contra    = (Σ weighted_strength(contradicting) + 0.5 × Σ mixed) × 1.35
-net       = support − contra
-
-external_raw        = 0.5 + 0.5 · tanh(net / 1.2)
-evidence_confidence = 1 − exp(−(support + contra) / 1.0)
-external            = 0.5 + (external_raw − 0.5) × evidence_confidence
-
-credibility = 100 × (0.45 × internal + 0.55 × external)
+CORROBORATION_EFFECT = {
+    CORROBORATED:                +1.00,
+    PARTIALLY_CORROBORATED:      +0.55,
+    PLAUSIBLE_UNVERIFIED:        +0.12,
+    INSUFFICIENT_EVIDENCE:        0.00,   # we searched and found nothing
+    NOT_INDEPENDENTLY_VERIFIED:   0.00,   # only a regulator could confirm it
+    DISPUTED:                    -0.45,
+    CONTRADICTED:                -0.95,
+}
 ```
 
-Three properties this shape guarantees:
+The two zeroes are the fix. A claim whose check could not be completed sits at
+its prior; only `contradicted` and `disputed` can push a score below it. This
+is enforced by test, over every status and every claim type.
 
-- **Absence of evidence is neutral.** With nothing retrieved,
-  `evidence_confidence = 0`, so `external = 0.5` exactly. A claim is never
-  punished for being novel; it is reported separately as uncorroborated.
-- **Contradiction outweighs confirmation** by 1.35×, because disconfirmation
-  is more informative than confirmation.
-- **Study design caps model enthusiasm.** `weighted_strength` multiplies the
-  model's strength by relevance, by a design weight (meta-analysis 1.00 →
-  case report 0.25, retracted 0.0) and by a computed record-quality score.
+```
+base  = prior + rigour_adjustment + tier_lift          # 0-1
+score = base + (1 - base) x leverage x effect          # effect >= 0
+      | base + base x leverage x effect                # effect <  0
+```
 
-The run-level score weights claims by category and importance, with
-thesis-critical claims at 1.6×, then applies visible penalties for
-contradicted or uncorroborated thesis-critical claims and for incomplete page
-coverage. Every score ships with its full `breakdown`, so an IC can be shown
-exactly why a claim scored 41 and not 72.
+#### 3. Evidence is weighted by what it can establish
 
-### 4.5 Deterministic rules
+`app/evidence/grading.py` places every retrieved record in an explicit
+hierarchy — regulatory approval (1.00) > pivotal trial in a top-tier journal
+(0.97) > meta-analysis (0.94) > pivotal trial (0.90) > systematic review (0.85)
+> Phase 2 (0.72) > registry with results (0.62) > early phase (0.58) >
+observational (0.50) > registry record (0.45) > preclinical (0.38) > narrative
+review (0.32) > preprint (0.28) > conference abstract (0.22) > company
+statement (0.10) > retracted (0.00).
+
+Grading is deterministic and derived from record metadata, so two runs over the
+same corpus grade it identically. Corroboration also requires the *right kind*
+of evidence: three narrative reviews cannot corroborate a clinical result, and
+resolve to `plausible_unverified` rather than `corroborated`.
+
+### 4.4a Authoritative verification
+
+The literature cannot answer "is this approved?" — PubMed does not index
+approvals, so searching it for a regulatory claim returns topically-related
+papers that say nothing about the claim. That mismatch is what made an approved
+product read as unsupported.
+
+`app/analysis/verification.py` routes regulatory and pipeline claims to sources
+that can settle them:
+
+* **openFDA / Drugs@FDA** for U.S. approval status and label population;
+* **ClinicalTrials.gov** for development stage, sponsor and trial existence.
+
+Three outcomes are carefully distinguished:
+
+| Outcome | Meaning | Effect |
+|---|---|---|
+| `VERIFIED` / `PARTIALLY_VERIFIED` | the source confirms it | corroborated |
+| `REFUTED` | the source positively disagrees | **contradicted** — a real finding |
+| `NOT_FOUND` / `SOURCE_UNAVAILABLE` | we could not check | not independently verified, no score impact |
+
+A **verified coverage boundary** is encoded in the code: Drugs@FDA covers CDER
+products including BLA biologics (pembrolizumab returns BLA125514) but does
+*not* index CBER-licensed vaccines — SPIKEVAX, MRESVIA and COMIRNATY all
+return 404. A missing vaccine is therefore a dataset gap, stated as such in the
+memo, never a negative finding.
+
+Verification also produces genuine adverse findings the old system could not
+distinguish from a search miss. On the real Moderna claims: "CMV: Phase 3
+efficacy" is **confirmed** by the registry, while "PA: registrational study
+efficacy" is **refuted** — the most advanced registered study for mRNA-3927 is
+Phase 2.
+
+### 4.4b The IC scorecard
+
+A single number hides which risk an investor is taking.
+`app/analysis/scorecard.py` produces ten dimensions, each with a score, a
+confidence band, and the findings that drove it:
+
+scientific validity · clinical maturity · regulatory confidence · evidence
+quality · execution credibility · platform strength · pipeline diversification
+· translational readiness · commercial readiness · disclosure quality
+
+Dimension weighting is set by **company archetype** (platform, commercial-stage,
+clinical-stage asset, preclinical asset), because a platform company's thesis is
+the platform's generalisability while a single-asset company's is one molecule.
+Platform claims are additionally assessed *in aggregate*: a platform whose
+assets are broadly corroborated has, by that fact, evidenced its platform even
+if no individual "our platform works" statement was confirmable.
+
+A dimension with no informing claims is reported as **not assessed**, never
+scored zero — the same discipline that governs claim scoring.
+
+### 4.5 Deterministic rules### 4.5 Deterministic rules
 
 `app/analysis/rules.py` fires from computed facts, not model judgement:
 translational gaps, effect sizes without statistics/controls/n, claims asserted

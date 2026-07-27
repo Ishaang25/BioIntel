@@ -83,6 +83,10 @@ ignore = ["B008", "RUF012"]
 # glyphs -- that is exactly what it exists to normalise.
 "app/utils/text.py" = ["RUF001"]
 "app/extraction/lexicon.py" = ["E501", "RUF001"]
+# Alias tables deliberately contain the look-alike glyphs the literature uses
+# (Greek letters in gene names); normalising them away would defeat the table.
+"app/evidence/normalization.py" = ["RUF001"]
+"app/analysis/scorecard.py" = ["E501"]
 
 [tool.mypy]
 python_version = "3.11"

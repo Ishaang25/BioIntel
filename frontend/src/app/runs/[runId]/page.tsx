@@ -3,6 +3,7 @@ import { notFound } from 'next/navigation';
 
 import { ClaimExplorer } from '@/components/ClaimExplorer';
 import { ReportView } from '@/components/ReportView';
+import { ScorecardView } from '@/components/ScorecardView';
 import { RunProgress } from '@/components/RunProgress';
 import { RunTabs, type Tab } from '@/components/RunTabs';
 import {
@@ -18,6 +19,7 @@ import {
   humanise,
 } from '@/components/ui';
 import { api, ApiRequestError, optional } from '@/lib/api';
+import { hasScorecard } from '@/lib/types';
 import type {
   Claim,
   Entity,
@@ -166,6 +168,15 @@ export default async function RunPage({ params }: { params: Promise<{ runId: str
           <RunTabs
             tabs={
               [
+                ...(hasScorecard(report.scorecard)
+                  ? [
+                      {
+                        id: 'scorecard',
+                        label: 'Scorecard',
+                        content: <ScorecardView scorecard={report.scorecard} />,
+                      },
+                    ]
+                  : []),
                 { id: 'memo', label: 'IC memo', content: <ReportView report={report} /> },
                 {
                   id: 'claims',

@@ -88,11 +88,26 @@ SECTION_PLAN: tuple[dict[str, str], ...] = (
     },
     {
         "id": "scorecard",
-        "heading": "Credibility Scorecard",
+        "heading": "Scorecard and What Drives It",
         "instruction": (
-            "Explain the composite credibility score using the scorecard figures supplied: what "
-            "drove it up, what drove it down, and how confident the assessment is. Present the "
-            "per-category breakdown as a markdown table. Do not recompute any number."
+            "Explain the ten-dimension scorecard using the supplied figures: which dimensions "
+            "carry the case, which hold it back, and what would move each. Distinguish "
+            "dimensions that score low because evidence disagrees from those that score low "
+            "because claims could not be checked -- these have completely different remedies. "
+            "Do not recompute any number and do not reproduce the table; the memo renders it "
+            "separately. Explain what it means."
+        ),
+    },
+    {
+        "id": "verification",
+        "heading": "Regulatory and Registry Verification",
+        "instruction": (
+            "Report what was checked against authoritative sources (the FDA drug database and "
+            "ClinicalTrials.gov) and what those checks returned. State clearly which claims "
+            "were confirmed, which were refuted by the public record, and which could not be "
+            "checked and why -- a source that does not cover a product class is a coverage "
+            "gap, not a negative finding. This section tells the reader which parts of the "
+            "regulatory narrative rest on company assertion alone."
         ),
     },
     {
@@ -156,8 +171,10 @@ class ReportBuilder:
         questions: list[Question],
         references: ReferenceTable,
         extra_limitations: list[str] | None = None,
+        scorecard: Any = None,
+        scientific_assessment: Any = None,
     ) -> BuiltReport:
-        scorecard = _format_scorecard(overall, claim_summaries)
+        scorecard_text = _format_scorecard(overall, claim_summaries, scorecard)
 
         output: ReportOut = await self.llm.structured(
             purpose="report",
@@ -166,7 +183,8 @@ class ReportBuilder:
             user=prompts.render(
                 "report",
                 company_context=company_context or "(no company profile could be extracted)",
-                scorecard=scorecard,
+                scorecard=scorecard_text,
+                scientific_assessment=_format_scientific_assessment(scientific_assessment),
                 claims=_format_claims_with_evidence(claim_summaries),
                 risks=_format_risks(risks),
                 questions=_format_questions(questions),
@@ -253,6 +271,10 @@ class ReportBuilder:
                     "id": (plan or {}).get("id", f"section_{index + 1}"),
                     "heading": section.heading,
                     "body_markdown": body.strip(),
+                    # The most-read line in each section: its bottom line for an IC.
+                    "so_what": getattr(section, "so_what", ""),
+                    "confidence": _value(getattr(section, "confidence", "")),
+                    "confidence_reason": getattr(section, "confidence_reason", ""),
                     "citations": [f"{m.group(1)}{m.group(2)}" for m in CITATION_RE.finditer(body)],
                     "basis": AssertionBasis.INFERRED.value,
                     "order": index,
@@ -272,27 +294,83 @@ def _format_section_plan() -> str:
     )
 
 
-def _format_scorecard(overall: OverallScore, claims: list[dict[str, Any]]) -> str:
-    by_category: dict[str, list[float]] = {}
-    for claim in claims:
-        by_category.setdefault(str(claim.get("category")), []).append(
-            float(claim.get("credibility_score") or 0.0)
+def _format_scorecard(
+    overall: OverallScore, claims: list[dict[str, Any]], scorecard: Any = None
+) -> str:
+    lines: list[str] = []
+
+    if scorecard is not None:
+        lines.extend(
+            [
+                f"Company archetype (drives dimension weighting): {scorecard.archetype.value}",
+                f"Overall IC score: {scorecard.overall_score:.1f}/100 "
+                f"({scorecard.overall_band.value})",
+                f"Assessment confidence: {scorecard.overall_confidence:.2f}",
+                f"Recommendation: {scorecard.recommendation.value}",
+                f"Recommendation rationale: {scorecard.recommendation_rationale}",
+                "",
+                "Dimensions:",
+            ]
         )
+        for dimension in scorecard.dimensions:
+            if not dimension.assessed:
+                lines.append(f"  - {dimension.label}: NOT ASSESSED. {dimension.rationale}")
+                continue
+            lines.append(
+                f"  - {dimension.label}: {dimension.score:.1f}/100 "
+                f"({dimension.band.value}, confidence {dimension.confidence_band.value}) "
+                f"- {dimension.rationale}"
+            )
+            for driver in dimension.negative_drivers[:2]:
+                lines.append(f"      down: [{driver.get('claim_id')}] {driver.get('reason', '')}")
+            for driver in dimension.positive_drivers[:2]:
+                lines.append(f"      up:   [{driver.get('claim_id')}] {driver.get('reason', '')}")
+        lines.append("")
 
-    lines = [
-        f"Composite scientific credibility: {overall.score:.1f}/100 ({overall.band.value})",
-        f"Assessment confidence: {overall.confidence:.2f}",
-        "",
-        "Per-category mean credibility:",
-    ]
-    for category, scores in sorted(by_category.items(), key=lambda kv: -len(kv[1])):
-        mean = sum(scores) / len(scores)
-        lines.append(f"  - {category}: {mean:.1f}/100 across {len(scores)} claim(s)")
+    lines.extend(
+        [
+            f"Claim-level credibility roll-up: {overall.score:.1f}/100 ({overall.band.value})",
+            "",
+            "Corroboration outcomes across scored claims:",
+        ]
+    )
+    statuses: dict[str, int] = {}
+    for claim in claims:
+        key = str(claim.get("corroboration_status") or "unknown")
+        statuses[key] = statuses.get(key, 0) + 1
+    for status, count in sorted(statuses.items(), key=lambda kv: -kv[1]):
+        lines.append(f"  - {status.replace('_', ' ')}: {count} claim(s)")
 
-    lines.extend(["", "Score components:"])
+    lines.extend(["", "Score components (computed, do not recompute):"])
     for key, value in overall.breakdown.items():
         lines.append(f"  - {key}: {value}")
     return "\n".join(lines)
+
+
+def _format_scientific_assessment(assessment: Any) -> str:
+    if assessment is None:
+        return "(scientific assessment was not produced for this run)"
+    precedent = assessment.modality_precedent
+    failures = (
+        f"Notable failures: {'; '.join(precedent.notable_failures)}"
+        if precedent.notable_failures
+        else "Notable failures: none surfaced by the retrieval."
+    )
+    return "\n".join(
+        [
+            f"Biological plausibility ({assessment.plausibility_confidence.value} confidence): "
+            f"{assessment.biological_plausibility}",
+            f"Modality precedent - {precedent.modality}; approved precedent exists: "
+            f"{precedent.has_approved_precedent}. {precedent.precedent_summary}",
+            failures,
+            f"First-in-class assessment: {assessment.first_in_class}",
+            f"Differentiation: {assessment.differentiation}",
+            f"De-risking achieved: {assessment.de_risking_achieved}",
+            f"Partnerability: {assessment.partnerability}",
+            f"Milestones that matter: {'; '.join(assessment.milestones_that_matter)}",
+            f"Key failure mode: {assessment.key_failure_mode}",
+        ]
+    )
 
 
 def _format_claims_with_evidence(summaries: list[dict[str, Any]]) -> str:
@@ -304,7 +382,8 @@ def _format_claims_with_evidence(summaries: list[dict[str, Any]]) -> str:
             f"[{claim['ref']}] {claim['statement']}",
             f"    quoted from page {claim.get('page_number')}: "
             f'"{truncate(claim.get("quote", ""), 240)}"',
-            f"    category={claim.get('category')} "
+            f"    type={claim.get('claim_type')} | category={claim.get('category')} "
+            f"| corroboration={claim.get('corroboration_status')} "
             f"| deck evidence tier={claim.get('claimed_tier')} "
             f"| thesis-critical={claim.get('is_thesis_critical')} "
             f"| credibility={claim.get('credibility_score')}/100 ({claim.get('band')}) "
@@ -364,3 +443,7 @@ def _dedupe_strings(values: list[str]) -> list[str]:
         seen.add(key)
         out.append(value.strip())
     return out
+
+
+def _value(enum_or_str: Any) -> str:
+    return enum_or_str.value if hasattr(enum_or_str, "value") else str(enum_or_str or "")

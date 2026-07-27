@@ -20,6 +20,9 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.enums import (
     ClaimCategory,
+    ClaimType,
+    ConfidenceLevel,
+    CorroborationStatus,
     EntityType,
     EvidenceTier,
     PublicationType,
@@ -217,6 +220,17 @@ class ExtractedClaim(StrictModel):
     from_visual: bool = Field(
         description="True if the quote came from a chart/figure reading rather than the text layer."
     )
+    claim_type: ClaimType = Field(
+        description=(
+            "What KIND of assertion this is. This is the most consequential field you "
+            "produce: it decides how the claim is checked and scored. A statement of "
+            "regulatory fact, an experimental result and a revenue projection are "
+            "different kinds of object and must not be labelled the same way. Choose "
+            "'marketing', 'corporate_vision', 'strategic_objective', 'forward_looking' or "
+            "'financial_guidance' for anything that cannot be true or false today -- those "
+            "are reported but excluded from credibility scoring."
+        )
+    )
     category: ClaimCategory = Field(description="Which aspect of the business the claim concerns.")
     claimed_evidence_tier: EvidenceTier = Field(
         description=(
@@ -313,6 +327,13 @@ class AdjudicationOut(StrictModel):
     study_design: PublicationType = Field(
         description="Your classification of the record's study design based on the supplied metadata."
     )
+    addresses_claim_directly: bool = Field(
+        description=(
+            "True only when the record is about the same intervention AND the same question "
+            "as the claim. A paper about the same disease but a different drug is topically "
+            "related, not directly on point; mark it false."
+        )
+    )
 
 
 class BatchAdjudicationItem(AdjudicationOut):
@@ -328,15 +349,72 @@ class BatchAdjudicationOut(StrictModel):
 
 
 # ============================================================== assessment ===
+class EvidenceComparison(StrictModel):
+    """How two or more retrieved records relate to each other."""
+
+    topic: str = Field(
+        description="The specific question the records bear on (e.g. 'durability beyond 12 months')."
+    )
+    agreement: str = Field(
+        description=(
+            "What the records agree on, citing them by reference id. Empty string if they "
+            "do not overlap enough to agree on anything."
+        )
+    )
+    disagreement: str = Field(
+        description=(
+            "Where they diverge and why (different population, dose, endpoint, follow-up). "
+            "Empty string if there is no genuine disagreement -- do not manufacture one."
+        )
+    )
+    quality_contrast: str = Field(
+        description=(
+            "How the records differ in evidential weight: study design, sample size, "
+            "randomisation, blinding, sponsor. Name which is stronger and why."
+        )
+    )
+    translatability: str = Field(
+        description=(
+            "What these records do and do not license you to conclude about the company's "
+            "claim: species, population, endpoint and dose gaps."
+        )
+    )
+
+
 class ClaimVerdictOut(StrictModel):
+    corroboration_status: CorroborationStatus = Field(
+        description=(
+            "The outcome of checking this claim. Use 'contradicted' ONLY when retrieved "
+            "evidence genuinely disagrees. Use 'insufficient_evidence' when the search "
+            "returned nothing on point, and 'not_independently_verified' when the claim is "
+            "the kind of thing only a regulator or the company could confirm. Absence of "
+            "evidence is not evidence against."
+        )
+    )
+    confidence: ConfidenceLevel = Field(
+        description="How confident you are in this determination, given what was retrieved."
+    )
+    confidence_reason: str = Field(
+        description=(
+            "One sentence explaining the confidence level: what would have to be true, or "
+            "what you would need to see, to raise it."
+        )
+    )
     verdict: str = Field(
         description=(
-            "2-4 sentences assessing whether the external literature supports the claim. "
-            "Explicitly distinguish what the deck asserts from what the literature shows."
+            "2-4 sentences for an investment committee. Separate three registers explicitly: "
+            "what the company asserts, what the retrieved literature shows, and what BioIntel "
+            "infers from the gap. Cite evidence by reference id."
+        )
+    )
+    comparisons: list[EvidenceComparison] = Field(
+        description=(
+            "Comparative synthesis of the retrieved records -- not a summary of each. "
+            "Empty list when fewer than two records bear on the claim."
         )
     )
     key_uncertainties: list[str] = Field(
-        description="The specific unknowns that prevent a firm conclusion. 1-4 items."
+        description="Specific, testable unknowns that prevent a firmer conclusion. 1-4 items."
     )
     novelty: float = Field(
         ge=0.0,
@@ -345,8 +423,14 @@ class ClaimVerdictOut(StrictModel):
     )
     translational_gap: str | None = Field(
         description=(
-            "The gap between the evidence tier the deck offers and what the claim implies, "
-            "or null if there is no meaningful gap."
+            "The gap between the evidence tier offered and what the claim implies, or null "
+            "if there is no material gap."
+        )
+    )
+    so_what: str = Field(
+        description=(
+            "One sentence: what this claim's status means for the investment decision. Not a "
+            "restatement of the verdict -- the consequence of it."
         )
     )
 
@@ -389,6 +473,117 @@ class RisksAndQuestionsOut(StrictModel):
     )
 
 
+# ==================================================== scientific reasoning ===
+class ModalityPrecedent(StrictModel):
+    """What history says about this therapeutic approach."""
+
+    modality: str = Field(description="The modality or approach, as the deck describes it.")
+    has_approved_precedent: bool = Field(
+        description="True only if the supplied evidence shows an approved product using this approach."
+    )
+    precedent_summary: str = Field(
+        description=(
+            "What the supplied evidence shows about this approach succeeding or failing "
+            "before. Cite records by reference id. If nothing was retrieved, say so."
+        )
+    )
+    notable_failures: list[str] = Field(
+        description=(
+            "Programmes at this target or using this modality that failed, per the supplied "
+            "evidence only. Empty list if none appear in the records."
+        )
+    )
+
+
+class ScientificAssessmentOut(StrictModel):
+    """The reasoning a biotech investor applies before the numbers."""
+
+    biological_plausibility: str = Field(
+        description=(
+            "Is the proposed mechanism consistent with what the supplied literature "
+            "establishes about this target and pathway? State the specific biology, not a "
+            "generic judgement."
+        )
+    )
+    plausibility_confidence: ConfidenceLevel = Field(
+        description="Confidence in the plausibility assessment."
+    )
+    modality_precedent: ModalityPrecedent = Field(
+        description="Whether this therapeutic approach has worked before."
+    )
+    first_in_class: str = Field(
+        description=(
+            "Is this first-in-class, best-in-class, or a follower? Justify from the retrieved "
+            "competitive records. Say 'cannot determine from the retrieved evidence' rather "
+            "than guessing."
+        )
+    )
+    differentiation: str = Field(
+        description=(
+            "What would have to be true for this asset to beat the standard of care or the "
+            "leading competitor, and does the supplied evidence support it?"
+        )
+    )
+    de_risking_achieved: str = Field(
+        description=(
+            "How much technical risk has actually been retired, in stages: target validated? "
+            "mechanism shown in humans? dose established? efficacy demonstrated?"
+        )
+    )
+    partnerability: str = Field(
+        description=(
+            "Would a pharmaceutical partner plausibly license this at its current stage, and "
+            "what would they need to see first? Reason from precedent in the retrieved records."
+        )
+    )
+    milestones_that_matter: list[str] = Field(
+        description=(
+            "The 3-5 specific readouts or events that would most change the investment view, "
+            "in order of impact."
+        )
+    )
+    key_failure_mode: str = Field(
+        description=(
+            "The single most likely way this programme fails scientifically, stated concretely."
+        )
+    )
+
+
+class DimensionCommentaryOut(StrictModel):
+    dimension: str = Field(
+        description="The scorecard dimension key, copied exactly from the input."
+    )
+    so_what: str = Field(
+        description=(
+            "One or two sentences on what this score means for the investment decision. Do "
+            "not restate the number; explain its consequence."
+        )
+    )
+    what_would_change_it: str = Field(
+        description="The specific evidence that would move this score materially."
+    )
+
+
+class ScorecardCommentaryOut(StrictModel):
+    """Narration of the computed scorecard. The model never sets the numbers."""
+
+    headline: str = Field(
+        description=(
+            "One sentence an IC chair could read aloud: the state of the scientific case, "
+            "using the supplied overall score. Do not recompute it."
+        )
+    )
+    commentary: list[DimensionCommentaryOut] = Field(
+        description="One entry per supplied dimension, in the same order."
+    )
+    decisive_factors: list[str] = Field(
+        description=(
+            "The 2-4 findings that most determine the recommendation, each stated as a "
+            "consequence rather than an observation."
+        )
+    )
+
+
 # ================================================================= report ===
 class ReportSectionOut(StrictModel):
     heading: str = Field(description="Section heading.")
@@ -396,8 +591,22 @@ class ReportSectionOut(StrictModel):
         description=(
             "Section body in markdown. Cite claims as [C#] and evidence as [E#] using the "
             "reference ids supplied. Every factual sentence must carry a citation or be "
-            "explicitly marked as BioIntel inference."
+            "explicitly marked as BioIntel inference. Analysis, not summary: the reader has "
+            "the deck already."
         )
+    )
+    so_what: str = Field(
+        description=(
+            "The section's bottom line for an investment committee, in one or two sentences. "
+            "What should the reader do or believe differently having read it? This is the "
+            "most-read line in the section; it must carry an argument, not a summary."
+        )
+    )
+    confidence: ConfidenceLevel = Field(
+        description="How confident this section's conclusions are, given the evidence behind them."
+    )
+    confidence_reason: str = Field(
+        description="One sentence explaining the confidence level for this section."
     )
     citation_refs: list[str] = Field(
         description="All [C#]/[E#] reference ids used in this section, copied exactly."
@@ -435,11 +644,14 @@ __all__ = [
     "CompanyProfileOut",
     "DataPoint",
     "DiligenceQuestionOut",
+    "DimensionCommentaryOut",
     "EntityExtractionOut",
+    "EvidenceComparison",
     "ExtractedClaim",
     "ExtractedEntity",
     "ExtractedTable",
     "LiteratureQuery",
+    "ModalityPrecedent",
     "PageUnderstandingOut",
     "PipelineProgram",
     "QuantitativeDetail",
@@ -448,6 +660,8 @@ __all__ = [
     "ReportSectionOut",
     "RiskOut",
     "RisksAndQuestionsOut",
+    "ScientificAssessmentOut",
+    "ScorecardCommentaryOut",
     "TeamMember",
     "VisualElement",
 ]

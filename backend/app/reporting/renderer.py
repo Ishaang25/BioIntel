@@ -42,6 +42,7 @@ def render_markdown(
     document_name: str | None = None,
     generated_at: dt.datetime | None = None,
     degraded: bool = False,
+    scorecard: dict[str, Any] | None = None,
 ) -> str:
     generated_at = generated_at or dt.datetime.now(dt.UTC)
     band = report.overall_band
@@ -77,6 +78,14 @@ def render_markdown(
             f"| **Scientific credibility** | **{report.overall_score:.1f} / 100** "
             f"({BAND_LABEL.get(band, band.value)}) |",
             f"| **Assessment confidence** | {report.confidence:.2f} |",
+        ]
+    )
+    if scorecard:
+        lines.append(
+            f"| **IC recommendation** | {_humanise(scorecard.get('recommendation', ''))} |"
+        )
+    lines.extend(
+        [
             "",
             "## Executive Summary",
             "",
@@ -85,8 +94,23 @@ def render_markdown(
         ]
     )
 
+    if scorecard:
+        lines.extend(_render_scorecard(scorecard))
+
     for section in sorted(report.sections, key=lambda s: s.get("order", 0)):
         lines.extend([f"## {section['heading']}", "", section["body_markdown"].strip(), ""])
+        so_what = (section.get("so_what") or "").strip()
+        if so_what:
+            lines.extend([f"> **So what:** {so_what}", ""])
+        confidence = (section.get("confidence") or "").strip()
+        if confidence:
+            reason = (section.get("confidence_reason") or "").strip()
+            lines.extend(
+                [
+                    f"_Confidence: **{confidence}**" + (f" — {reason}" if reason else "") + "_",
+                    "",
+                ]
+            )
 
     lines.extend(["## Recommendation", "", report.recommendation.strip(), ""])
 
@@ -137,6 +161,7 @@ def render_html(
     document_name: str | None = None,
     generated_at: dt.datetime | None = None,
     degraded: bool = False,
+    scorecard: dict[str, Any] | None = None,
 ) -> str:
     markdown = render_markdown(
         report,
@@ -144,6 +169,7 @@ def render_html(
         document_name=document_name,
         generated_at=generated_at,
         degraded=degraded,
+        scorecard=scorecard,
     )
     body = _md.render(markdown)
     band = report.overall_band
@@ -201,3 +227,70 @@ def render_html(
 </body>
 </html>
 """
+
+
+def _render_scorecard(scorecard: dict[str, Any]) -> list[str]:
+    """The ten-dimension scorecard as a markdown table.
+
+    Rendered by BioIntel rather than written by the model, so the numbers in
+    the memo are always the computed ones.
+    """
+    dimensions = scorecard.get("dimensions") or []
+    if not dimensions:
+        return []
+
+    lines = [
+        "## Investment Committee Scorecard",
+        "",
+        (
+            "Scores are computed deterministically from the claim-level analysis. "
+            "A dimension marked *not assessed* had no claims bearing on it — that is a gap "
+            "in the deck, not a negative finding."
+        ),
+        "",
+        "| Dimension | Score | Band | Confidence | What it answers |",
+        "|---|---|---|---|---|",
+    ]
+    for dimension in dimensions:
+        score = dimension.get("score")
+        score_cell = f"**{score:.0f}**/100" if isinstance(score, int | float) else "—"
+        band = _humanise(dimension.get("band") or "not assessed")
+        confidence = _humanise(dimension.get("confidence_band") or "—")
+        lines.append(
+            f"| {dimension.get('label', '')} | {score_cell} | {band} | {confidence} | "
+            f"{dimension.get('question', '')} |"
+        )
+
+    lines.extend(
+        [
+            "",
+            f"**Company archetype:** {_humanise(scorecard.get('archetype', 'unknown'))} — "
+            "dimension weighting is set by archetype, because a platform company and a "
+            "single-asset company do not carry the same risks.",
+            "",
+            f"**Recommendation: {_humanise(scorecard.get('recommendation', ''))}.** "
+            f"{scorecard.get('recommendation_rationale', '')}",
+            "",
+        ]
+    )
+
+    weak = [
+        d
+        for d in dimensions
+        if isinstance(d.get("score"), int | float) and d["score"] < 50 and d.get("negative_drivers")
+    ]
+    if weak:
+        lines.extend(["### What is holding the score down", ""])
+        for dimension in weak[:4]:
+            lines.append(f"- **{dimension.get('label')}** — {dimension.get('rationale', '')}")
+            for driver in (dimension.get("negative_drivers") or [])[:2]:
+                reason = driver.get("reason", "")
+                ref = driver.get("claim_id", "")
+                lines.append(f"  - {reason}" + (f" ({ref})" if ref else ""))
+        lines.append("")
+
+    return lines
+
+
+def _humanise(value: str) -> str:
+    return str(value).replace("_", " ").strip().capitalize() if value else "—"

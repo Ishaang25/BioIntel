@@ -29,6 +29,18 @@ export function ReportView({ report }: { report: Report }) {
             className="prose-report"
             dangerouslySetInnerHTML={{ __html: markdownToHtml(section.body_markdown) }}
           />
+          {section.so_what && (
+            <p className="mt-3 border-l-4 border-ink-900 bg-ink-100 px-4 py-2.5 text-[15px] dark:border-ink-100 dark:bg-ink-800/60">
+              <span className="label">So what</span>{' '}
+              <span className="font-medium">{section.so_what}</span>
+            </p>
+          )}
+          {section.confidence && (
+            <p className="mt-2 text-xs text-ink-500">
+              Confidence: <span className="font-medium">{section.confidence}</span>
+              {section.confidence_reason ? ` — ${section.confidence_reason}` : ''}
+            </p>
+          )}
         </section>
       ))}
 

@@ -32,6 +32,8 @@ STRICT_KEYS = {
 }
 
 ALL_SCHEMAS = [
+    S.ScientificAssessmentOut,
+    S.ScorecardCommentaryOut,
     S.PageUnderstandingOut,
     S.CompanyProfileOut,
     S.EntityExtractionOut,
@@ -94,9 +96,62 @@ class TestStrictSchema:
         assert "$defs" in schema
         assert "ExtractedClaim" in schema["$defs"]
 
-    def test_enums_are_preserved(self):
+    def test_enums_are_inlined_with_their_field_description(self):
+        """OpenAI strict mode rejects ``$ref`` carrying sibling keywords.
+
+        Pydantic emits exactly that for every enum field with a description,
+        so enums are inlined -- keeping the per-field guidance and satisfying
+        the dialect. Before this, every call silently fell back to non-strict.
+        """
         schema = to_strict_schema(S.ClaimExtractionOut)
-        assert schema["$defs"]["ClaimCategory"]["enum"]
+        claim_type = schema["$defs"]["ExtractedClaim"]["properties"]["claim_type"]
+        assert claim_type["enum"], "enum values must survive inlining"
+        assert claim_type["description"], "the field description must survive"
+        assert "$ref" not in claim_type
+
+    def test_no_ref_carries_sibling_keywords(self):
+        """The invariant OpenAI enforces; asserted over every contract."""
+
+        def walk(node, path="root"):
+            if isinstance(node, dict):
+                if "$ref" in node and len(node) > 1:
+                    raise AssertionError(f"{path}: $ref with siblings {set(node) - {'$ref'}}")
+                for key, value in node.items():
+                    if key in {"properties", "$defs"} and isinstance(value, dict):
+                        for name, child in value.items():
+                            walk(child, f"{path}.{key}.{name}")
+                    elif key == "anyOf" and isinstance(value, list):
+                        for index, child in enumerate(value):
+                            walk(child, f"{path}.anyOf[{index}]")
+                    elif key == "items":
+                        walk(value, f"{path}.items")
+                    elif isinstance(value, dict):
+                        walk(value, f"{path}.{key}")
+
+        for model in ALL_SCHEMAS:
+            walk(to_strict_schema(model), model.__name__)
+
+    def test_unused_definitions_are_pruned(self):
+        """Strict mode rejects a schema with definitions nothing references."""
+        schema = to_strict_schema(S.ClaimExtractionOut)
+        referenced: set[str] = set()
+
+        def collect(node):
+            if isinstance(node, dict):
+                ref = node.get("$ref")
+                if isinstance(ref, str):
+                    referenced.add(ref.rsplit("/", 1)[-1])
+                for key, value in node.items():
+                    if key != "$defs":
+                        collect(value)
+            elif isinstance(node, list):
+                for item in node:
+                    collect(item)
+
+        collect({k: v for k, v in schema.items() if k != "$defs"})
+        for name in schema.get("$defs", {}):
+            collect(schema["$defs"][name])
+        assert set(schema.get("$defs", {})) <= referenced
 
 
 class TestPrompts:
@@ -117,6 +172,8 @@ class TestPrompts:
             "claim_statement": "s",
             "claim_quote": "q",
             "claim_category": "c",
+            "claim_type": "mechanism",
+            "corroboration_guidance": "g",
             "claimed_tier": "t",
             "evidence": "e",
         },
@@ -125,6 +182,9 @@ class TestPrompts:
             "claim_quote": "q",
             "claimed_tier": "t",
             "claim_category": "c",
+            "claim_type": "mechanism",
+            "corroboration_guidance": "g",
+            "verification_summary": "v",
             "supporting_count": 1,
             "contradicting_count": 0,
             "neutral_count": 0,
@@ -132,15 +192,30 @@ class TestPrompts:
             "evidence_summary": "e",
         },
         "risks_questions": {"company_context": "c", "claims": "x", "signals": "y"},
+        "scientific_assessment": {
+            "company_context": "c",
+            "thesis_claims": "t",
+            "evidence_digest": "e",
+            "competitive_records": "r",
+        },
+        "scorecard": {"scorecard": "s", "drivers": "d"},
         "report": {
             "company_context": "c",
             "scorecard": "s",
+            "scientific_assessment": "a",
             "claims": "x",
             "risks": "r",
             "questions": "q",
             "section_plan": "p",
         },
     }
+
+    def test_every_prompt_file_is_covered(self):
+        """A new prompt without a render test is a runtime failure waiting."""
+        from app.llm.prompts import PROMPT_DIR
+
+        on_disk = {path.stem for path in PROMPT_DIR.glob("*.md")}
+        assert on_disk == set(self.ALL_PROMPTS)
 
     @pytest.mark.parametrize("name", sorted(ALL_PROMPTS))
     def test_every_prompt_renders(self, name):
@@ -216,10 +291,15 @@ class TestClient:
                     if Broken.calls == 1
                     else json.dumps(
                         {
+                            "corroboration_status": "insufficient_evidence",
+                            "confidence": "low",
+                            "confidence_reason": "nothing on point was retrieved",
                             "verdict": "v",
+                            "comparisons": [],
                             "key_uncertainties": [],
                             "novelty": 0.5,
                             "translational_gap": None,
+                            "so_what": "s",
                         }
                     )
                 )

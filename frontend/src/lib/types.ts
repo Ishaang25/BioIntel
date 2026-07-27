@@ -13,6 +13,58 @@ export type Stance = 'supports' | 'contradicts' | 'mixed' | 'neutral' | 'unrelat
 export type RiskSeverity = 'critical' | 'high' | 'medium' | 'low' | 'info';
 export type QuestionPriority = 'critical' | 'high' | 'medium' | 'low';
 export type QuoteVerification = 'exact' | 'fuzzy' | 'not_found' | 'not_applicable';
+export type ConfidenceLevel = 'high' | 'medium' | 'low';
+
+/**
+ * The outcome of trying to check a claim.
+ *
+ * The distinction that matters most is between `insufficient_evidence` /
+ * `not_independently_verified` (we could not check) and `contradicted` /
+ * `disputed` (the evidence disagrees). Only the latter reduce a score.
+ */
+export type CorroborationStatus =
+  | 'corroborated'
+  | 'partially_corroborated'
+  | 'plausible_unverified'
+  | 'insufficient_evidence'
+  | 'not_independently_verified'
+  | 'contradicted'
+  | 'disputed'
+  | 'not_assessable';
+
+export type ICRecommendation =
+  | 'advance'
+  | 'advance_with_conditions'
+  | 'further_diligence_required'
+  | 'significant_concerns'
+  | 'do_not_advance';
+
+export interface DimensionScore {
+  dimension: string;
+  label: string;
+  question: string;
+  /** Null when no claim informed this dimension — a gap, not a zero. */
+  score: number | null;
+  band: CredibilityBand | null;
+  confidence: number;
+  confidence_band: ConfidenceLevel;
+  rationale: string;
+  positive_drivers: Array<Record<string, string>>;
+  negative_drivers: Array<Record<string, string>>;
+  claims_considered: number;
+  assessed: boolean;
+}
+
+export interface Scorecard {
+  overall_score: number;
+  overall_band: CredibilityBand;
+  overall_confidence: number;
+  recommendation: ICRecommendation;
+  recommendation_rationale: string;
+  archetype: string;
+  dimensions: DimensionScore[];
+  breakdown: Record<string, unknown>;
+}
 
 export interface Paginated<T> {
   items: T[];
@@ -103,6 +155,14 @@ export interface RunDetail extends Run {
 export interface Assessment {
   credibility_score: number;
   credibility_band: CredibilityBand;
+  corroboration_status: CorroborationStatus;
+  corroboration_rationale: string;
+  is_scorable: boolean;
+  score_explanation: string;
+  verification_status: string | null;
+  verification_source: string | null;
+  verification_detail: string | null;
+  verification_identifiers: string[];
   confidence: number;
   supporting_count: number;
   contradicting_count: number;
@@ -128,6 +188,7 @@ export interface Claim {
   verbatim_quote: string;
   page_number: number;
   from_visual: boolean;
+  claim_type: string;
   category: string;
   claimed_evidence_tier: string;
   quantitative: Array<Record<string, unknown>>;
@@ -225,6 +286,10 @@ export interface ReportSection {
   id: string;
   heading: string;
   body_markdown: string;
+  /** The section's bottom line for an investment committee. */
+  so_what: string;
+  confidence: ConfidenceLevel | '';
+  confidence_reason: string;
   citations: string[];
   basis: string;
   order: number;
@@ -241,6 +306,9 @@ export interface Report {
   confidence: number;
   recommendation: string;
   score_breakdown: Record<string, unknown>;
+  scorecard: Scorecard | Record<string, never>;
+  scientific_assessment: Record<string, unknown>;
+  ic_recommendation: string | null;
   citations: Array<Record<string, unknown>>;
   limitations: string[];
   markdown: string;
@@ -274,4 +342,15 @@ export interface ProgressEvent {
   error_message: string | null;
   stages: Array<{ stage: string; status: StageStatus; duration_ms: number | null; error: string | null }>;
   counts: Record<string, number>;
+}
+
+
+/**
+ * Narrows the report's scorecard field, which is `{}` for runs produced before
+ * the scorecard existed and for any run whose assessment stage degraded.
+ */
+export function hasScorecard(
+  value: Scorecard | Record<string, never>,
+): value is Scorecard {
+  return Boolean(value) && Array.isArray((value as Scorecard).dimensions);
 }

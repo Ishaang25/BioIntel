@@ -399,6 +399,7 @@ def export_report(
         document_name=document.filename,
         generated_at=report.created_at,
         degraded=bool((run.metrics or {}).get("degraded")),
+        scorecard=report.scorecard or None,
     )
     return Response(
         content=html,

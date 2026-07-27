@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from 'react';
 
+import { CorroborationChip } from '@/components/ScorecardView';
 import { BandChip, Chip, StanceChip, humanise } from '@/components/ui';
 import type { Claim, EvidenceLink } from '@/lib/types';
 
@@ -39,7 +40,13 @@ export function ClaimExplorer({
     const filtered = claims.filter((claim) => {
       if (criticalOnly && !claim.is_thesis_critical) return false;
       if (category !== 'all' && claim.category !== category) return false;
-      if (contestedOnly && (claim.assessment?.contradicting_count ?? 0) === 0) return false;
+      if (
+        contestedOnly &&
+        claim.assessment?.corroboration_status !== 'contradicted' &&
+        claim.assessment?.corroboration_status !== 'disputed'
+      ) {
+        return false;
+      }
       if (!needle) return true;
       return (
         claim.statement.toLowerCase().includes(needle) ||
@@ -107,7 +114,7 @@ export function ClaimExplorer({
             checked={contestedOnly}
             onChange={(event) => setContestedOnly(event.target.checked)}
           />
-          Contested
+          Contradicted only
         </label>
       </div>
 
@@ -135,6 +142,10 @@ export function ClaimExplorer({
                   </blockquote>
 
                   <div className="mt-3 flex flex-wrap items-center gap-1.5">
+                    {claim.assessment && (
+                      <CorroborationChip status={claim.assessment.corroboration_status} />
+                    )}
+                    <Chip>{humanise(claim.claim_type)}</Chip>
                     <Chip>{humanise(claim.category)}</Chip>
                     <Chip>{humanise(claim.claimed_evidence_tier)}</Chip>
                     {claim.is_thesis_critical && <Chip tone="accent">thesis-critical</Chip>}
@@ -146,7 +157,7 @@ export function ClaimExplorer({
                   </div>
                 </div>
 
-                {claim.assessment && (
+                {claim.assessment && claim.assessment.is_scorable && (
                   <div className="shrink-0 text-right">
                     <BandChip
                       band={claim.assessment.credibility_band}
@@ -169,6 +180,26 @@ export function ClaimExplorer({
                 <p className="mt-3 rounded-md bg-ink-100 px-3 py-2 text-sm text-ink-700 dark:bg-ink-800/60 dark:text-ink-300">
                   {claim.assessment.verdict}
                 </p>
+              )}
+
+              {claim.assessment?.verification_detail && (
+                <p className="mt-2 rounded-md border border-sky-500/25 bg-sky-500/5 px-3 py-2 text-sm">
+                  <span className="label">
+                    Checked against {humanise(claim.assessment.verification_source ?? 'source')}
+                  </span>{' '}
+                  {claim.assessment.verification_detail}
+                </p>
+              )}
+
+              {claim.assessment?.score_explanation && (
+                <details className="mt-2 text-sm">
+                  <summary className="cursor-pointer text-ink-500 hover:text-ink-900 dark:hover:text-ink-100">
+                    Why this score
+                  </summary>
+                  <p className="mt-1.5 text-ink-600 dark:text-ink-400">
+                    {claim.assessment.score_explanation}
+                  </p>
+                </details>
               )}
 
               {links.length > 0 && (

@@ -20,9 +20,14 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.analysis.adjudicator import ClaimAdjudication
+from app.analysis.corroboration import CorroborationAssessment
 from app.analysis.scoring import ClaimScore, ClaimScoringInput
 from app.core.enums import (
+    ADVERSE_CORROBORATION,
+    UNCHECKED_CORROBORATION,
     ClaimCategory,
+    ClaimType,
+    CorroborationStatus,
     EvidenceTier,
     QuoteVerification,
     RiskCategory,
@@ -54,6 +59,8 @@ class ClaimContext:
     scoring: ClaimScoringInput
     score: ClaimScore
     adjudication: ClaimAdjudication | None
+    #: What the evidence established; drives the adverse-finding rules.
+    corroboration: CorroborationAssessment | None = None
     quote_match_score: float = 1.0
     from_visual: bool = False
 
@@ -69,6 +76,17 @@ _PRECLINICAL_TIERS = {
 }
 
 _CLINICAL_CATEGORIES = {ClaimCategory.CLINICAL_EFFICACY, ClaimCategory.SAFETY}
+
+#: Claim types that report an experimental or clinical result and therefore
+#: ought to say what evidence underpins them.
+_RESULT_CLAIM_TYPES = {
+    ClaimType.CLINICAL_RESULT,
+    ClaimType.PRECLINICAL_RESULT,
+    ClaimType.SAFETY,
+    ClaimType.MECHANISM,
+    ClaimType.BIOMARKER,
+    ClaimType.TRACK_RECORD,
+}
 
 
 def evaluate(contexts: Iterable[ClaimContext]) -> list[RuleFinding]:
@@ -89,7 +107,19 @@ def _claim_rules(ctx: ClaimContext) -> list[RuleFinding]:
     claim = ctx.scoring
     snippet = truncate(ctx.statement, 200)
 
-    if claim.is_thesis_critical and ctx.score.contradicting_count > 0:
+    # Claims that are not assessable (vision, guidance, marketing) never
+    # generate evidence-based findings: there is nothing to corroborate.
+    if not ctx.score.scored:
+        return out
+
+    status = ctx.score.corroboration
+
+    if claim.is_thesis_critical and status in ADVERSE_CORROBORATION:
+        disagreement = (
+            "disagrees with it"
+            if status is CorroborationStatus.CONTRADICTED
+            else "is genuinely split on it"
+        )
         out.append(
             RuleFinding(
                 rule_id="contradicted_thesis_claim",
@@ -97,10 +127,10 @@ def _claim_rules(ctx: ClaimContext) -> list[RuleFinding]:
                 category=RiskCategory.SCIENTIFIC,
                 severity=RiskSeverity.CRITICAL,
                 description=(
-                    f'The claim "{snippet}" is thesis-critical, and '
-                    f"{ctx.score.contradicting_count} retrieved record(s) were adjudicated as "
-                    "contradicting it. BioIntel flags this automatically; the cited records "
-                    "should be read in full before proceeding."
+                    f'The claim "{snippet}" is thesis-critical, and the retrieved evidence '
+                    f"{disagreement}. "
+                    + (ctx.corroboration.rationale if ctx.corroboration else "")
+                    + " The cited records should be read in full before proceeding."
                 ),
                 claim_id=ctx.claim_id,
                 evidence_ids=_evidence_ids(ctx, "contradicting"),
@@ -108,7 +138,9 @@ def _claim_rules(ctx: ClaimContext) -> list[RuleFinding]:
             )
         )
 
-    if claim.is_thesis_critical and ctx.score.supporting_count == 0:
+    # Fires only when the check ran and found nothing on point -- never when
+    # the claim was of a kind no public source can settle.
+    if claim.is_thesis_critical and status is CorroborationStatus.INSUFFICIENT_EVIDENCE:
         out.append(
             RuleFinding(
                 rule_id="uncorroborated_thesis_claim",
@@ -116,7 +148,7 @@ def _claim_rules(ctx: ClaimContext) -> list[RuleFinding]:
                 category=RiskCategory.SCIENTIFIC,
                 severity=RiskSeverity.HIGH,
                 description=(
-                    f'No retrieved literature supports the thesis-critical claim "{snippet}". '
+                    f'No retrieved literature bears on the thesis-critical claim "{snippet}". '
                     "This is a statement about the search result, not proof the claim is false, "
                     "but it means the claim currently rests on company-internal data alone."
                 ),
@@ -125,16 +157,43 @@ def _claim_rules(ctx: ClaimContext) -> list[RuleFinding]:
             )
         )
 
-    if claim.claimed_tier is EvidenceTier.NONE_STATED and claim.importance >= 0.6:
+    if claim.is_thesis_critical and status is CorroborationStatus.NOT_INDEPENDENTLY_VERIFIED:
         out.append(
             RuleFinding(
-                rule_id="assertion_without_data",
-                title="Material claim asserted without any stated evidence",
+                rule_id="unverifiable_thesis_claim",
+                title="Thesis-critical claim cannot be verified from public sources",
                 category=RiskCategory.DATA_INTEGRITY,
                 severity=RiskSeverity.HIGH,
                 description=(
-                    f'The deck asserts "{snippet}" without describing any experiment, dataset '
-                    "or citation that supports it."
+                    f'The thesis-critical claim "{snippet}" concerns something only a regulator, '
+                    "a registry or the company itself can confirm. "
+                    + (ctx.corroboration.rationale if ctx.corroboration else "")
+                    + " The diligence path for this claim runs through primary documents rather "
+                    "than the literature."
+                ),
+                claim_id=ctx.claim_id,
+                source_pages=[ctx.page_number],
+            )
+        )
+
+    # Only claim types that *report a result* are expected to state an evidence
+    # tier. An approval, a pipeline stage or a partnership legitimately states
+    # none, and flagging those was the rule-level form of the same mistake the
+    # scoring model made: treating "no experiment described" as a defect.
+    if (
+        claim.claim_type in _RESULT_CLAIM_TYPES
+        and claim.claimed_tier is EvidenceTier.NONE_STATED
+        and claim.importance >= 0.6
+    ):
+        out.append(
+            RuleFinding(
+                rule_id="assertion_without_data",
+                title="Material result claimed without any stated evidence",
+                category=RiskCategory.DATA_INTEGRITY,
+                severity=RiskSeverity.HIGH,
+                description=(
+                    f'The deck reports "{snippet}" as a result without describing any '
+                    "experiment, dataset or citation behind it."
                 ),
                 claim_id=ctx.claim_id,
                 source_pages=[ctx.page_number],
@@ -328,9 +387,9 @@ def _portfolio_rules(contexts: list[ClaimContext]) -> list[RuleFinding]:
         return out
 
     total = len(contexts)
-    no_evidence = [
-        c for c in contexts if c.score.supporting_count == 0 and c.score.contradicting_count == 0
-    ]
+    scored = [c for c in contexts if c.score.scored]
+    total = len(scored) or total
+    no_evidence = [c for c in scored if c.score.corroboration in UNCHECKED_CORROBORATION]
     if total >= 5 and len(no_evidence) / total >= 0.6:
         out.append(
             RuleFinding(
@@ -339,10 +398,11 @@ def _portfolio_rules(contexts: list[ClaimContext]) -> list[RuleFinding]:
                 category=RiskCategory.SCIENTIFIC,
                 severity=RiskSeverity.MEDIUM,
                 description=(
-                    f"{len(no_evidence)} of {total} claims returned no relevant external "
-                    "records. This may indicate a genuinely novel approach, or that the "
-                    "claims are too company-specific to be checked externally. Either way "
-                    "the analysis rests heavily on company-supplied data."
+                    f"{len(no_evidence)} of {total} scored claims could not be checked "
+                    "against public sources. This may indicate a genuinely novel approach, or "
+                    "claims too company-specific to check externally. It is an information gap "
+                    "rather than adverse evidence, but it means the analysis rests heavily on "
+                    "company-supplied data."
                 ),
             )
         )

@@ -14,6 +14,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.enums import (
     ClaimCategory,
+    ClaimType,
+    CorroborationStatus,
     CredibilityBand,
     EntityType,
     EvidenceSource,
@@ -166,6 +168,17 @@ class QuantitativeOut(ApiModel):
 class AssessmentOut(ApiModel):
     credibility_score: float
     credibility_band: CredibilityBand
+    #: What the evidence established. Distinguishes "nothing found" from
+    #: "evidence disagrees" -- these are scored completely differently.
+    corroboration_status: CorroborationStatus
+    corroboration_rationale: str = ""
+    #: False when the claim is excluded from credibility scoring by type.
+    is_scorable: bool = True
+    score_explanation: str = ""
+    verification_status: str | None = None
+    verification_source: str | None = None
+    verification_detail: str | None = None
+    verification_identifiers: list[str] = Field(default_factory=list)
     confidence: float
     supporting_count: int
     contradicting_count: int
@@ -225,6 +238,7 @@ class ClaimOut(ApiModel):
     verbatim_quote: str
     page_number: int
     from_visual: bool
+    claim_type: ClaimType
     category: ClaimCategory
     claimed_evidence_tier: EvidenceTier
     quantitative: list[dict[str, Any]] = Field(default_factory=list)
@@ -296,6 +310,10 @@ class ReportOut(ApiModel):
     confidence: float
     recommendation: str
     score_breakdown: dict[str, Any] = Field(default_factory=dict)
+    #: Ten-dimension IC scorecard with per-dimension drivers and confidence.
+    scorecard: dict[str, Any] = Field(default_factory=dict)
+    scientific_assessment: dict[str, Any] = Field(default_factory=dict)
+    ic_recommendation: str | None = None
     citations: list[dict[str, Any]] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
     markdown: str

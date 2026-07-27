@@ -25,6 +25,9 @@ from pydantic import BaseModel
 
 from app.core.enums import (
     ClaimCategory,
+    ClaimType,
+    ConfidenceLevel,
+    CorroborationStatus,
     PublicationType,
     QuestionPriority,
     RiskCategory,
@@ -248,7 +251,12 @@ def _claims(context: dict[str, Any], request: LLMRequest) -> dict[str, Any]:
         for sentence in split_sentences(text):
             if len(sentence) < 35 or len(sentence) > 600:
                 continue
-            if not lexicon.looks_scientific(sentence):
+            # Keep non-scientific statements too, correctly typed. Knowing that
+            # a third of a deck is promotional or forward-looking is itself a
+            # finding; dropping those sentences hides it and biases the
+            # disclosure-quality assessment.
+            claim_type = _infer_claim_type(sentence, lexicon.infer_claim_category(sentence))
+            if not lexicon.looks_scientific(sentence) and claim_type is ClaimType.OTHER:
                 continue
             key = sentence.lower()[:120]
             if key in seen:
@@ -267,6 +275,7 @@ def _claims(context: dict[str, Any], request: LLMRequest) -> dict[str, Any]:
                     "verbatim_quote": sentence,
                     "page_number": page_number,
                     "from_visual": False,
+                    "claim_type": _infer_claim_type(sentence, category).value,
                     "category": category.value,
                     "claimed_evidence_tier": tier.value,
                     "quantitative": [
@@ -435,6 +444,7 @@ def _batch_adjudication(context: dict[str, Any], request: LLMRequest) -> dict[st
                 ),
                 "caveats": [STUB_NOTE],
                 "study_design": _guess_design(record).value,
+                "addresses_claim_directly": relevance >= 0.45,
             }
         )
     return {"adjudications": out}
@@ -483,30 +493,73 @@ def _claim_verdict(context: dict[str, Any], request: LLMRequest) -> dict[str, An
     contradicting = int(context.get("contradicting_count", 0))
     total = int(context.get("evidence_count", 0))
     tier = context.get("claimed_evidence_tier", "none_stated")
+    claim_type = context.get("claim_type", "other")
+    status = context.get("null_status", CorroborationStatus.INSUFFICIENT_EVIDENCE.value)
+
+    # Mirror the real system's discipline: nothing found is never a contradiction.
+    if contradicting > supporting and contradicting > 0:
+        resolved = CorroborationStatus.CONTRADICTED.value
+    elif supporting > 0:
+        resolved = CorroborationStatus.PARTIALLY_CORROBORATED.value
+    elif total == 0:
+        resolved = status
+    else:
+        resolved = CorroborationStatus.PLAUSIBLE_UNVERIFIED.value
 
     if total == 0:
         verdict = (
             "No external literature was retrieved for this claim, so it could not be "
-            "corroborated independently. The claim rests entirely on the company's own "
-            "assertion in the deck."
+            "corroborated independently. This reflects the search, not the truth of the "
+            "claim."
         )
     else:
         verdict = (
             f"Offline lexical matching found {supporting} record(s) consistent with the claim "
-            f"and {contradicting} record(s) that appear to conflict, out of {total} retrieved. "
-            "This is a keyword-level comparison, not a scientific reading of the evidence."
+            f"and {contradicting} that appear to conflict, out of {total} retrieved. This is a "
+            "keyword-level comparison, not a scientific reading."
         )
-    uncertainties = [
-        "Semantic adjudication of the retrieved evidence was not performed (offline mode).",
-        f"The deck's strongest stated evidence tier for this claim is '{tier}'.",
-    ]
-    if contradicting:
-        uncertainties.append("Potentially conflicting reports require manual review.")
+
+    comparisons = []
+    if total >= 2:
+        comparisons.append(
+            {
+                "topic": "Overall consistency of the retrieved records",
+                "agreement": (
+                    f"{supporting} record(s) share vocabulary with the claim." if supporting else ""
+                ),
+                "disagreement": (
+                    f"{contradicting} record(s) contain negating language." if contradicting else ""
+                ),
+                "quality_contrast": (
+                    "Offline mode cannot compare study designs; enable a language-model "
+                    "provider for evidence-quality contrast."
+                ),
+                "translatability": (
+                    "Not assessed offline. Species, population and endpoint gaps were not "
+                    "evaluated."
+                ),
+            }
+        )
+
     return {
+        "corroboration_status": resolved,
+        "confidence": ConfidenceLevel.LOW.value,
+        "confidence_reason": (
+            "Produced by deterministic lexical matching rather than scientific reading; "
+            "confidence cannot exceed low in this mode."
+        ),
         "verdict": verdict,
-        "key_uncertainties": uncertainties[:4],
+        "comparisons": comparisons,
+        "key_uncertainties": [
+            "Semantic adjudication of the retrieved evidence was not performed (offline mode).",
+            f"The deck's strongest stated evidence tier for this claim is '{tier}'.",
+        ][:4],
         "novelty": 0.5 if total == 0 else round(max(0.0, 1.0 - min(1.0, total / 10.0)), 3),
         "translational_gap": None,
+        "so_what": (
+            f"This {str(claim_type).replace('_', ' ')} claim requires review by a qualified "
+            "advisor before it can inform a decision."
+        ),
     }
 
 
@@ -647,6 +700,11 @@ def _report(context: dict[str, Any], request: LLMRequest) -> dict[str, Any]:
                 f"_{item.get('instruction', '')}_\n\n"
                 f"{STUB_NOTE} Configure `OPENAI_API_KEY` and re-run to generate this section."
             ),
+            "so_what": (
+                "Not available offline: narrative analysis requires a language-model provider."
+            ),
+            "confidence": ConfidenceLevel.LOW.value,
+            "confidence_reason": STUB_NOTE,
             "citation_refs": [],
         }
         for item in section_plan
@@ -807,3 +865,122 @@ def _jaccard(a: set[str], b: set[str]) -> float:
     if not a or not b:
         return 0.0
     return len(a & b) / len(a | b)
+
+
+def _infer_claim_type(sentence: str, category: ClaimCategory) -> ClaimType:
+    """Deterministic claim typing for offline mode.
+
+    Mirrors the taxonomy the model is asked to apply, so the offline path
+    exercises the same type-driven scoring rather than defaulting everything
+    to one bucket.
+    """
+    lowered = sentence.lower()
+
+    if lexicon.has_puffery(sentence) and not lexicon.find_quantities(sentence):
+        return ClaimType.MARKETING
+    if re.search(r"\b(we will|we plan|plans to|expects? to|on track to|by 20\d\d)\b", lowered):
+        return ClaimType.FORWARD_LOOKING
+    if re.search(r"\b(our (mission|vision|goal)|founded to|built to|committed to)\b", lowered):
+        return ClaimType.CORPORATE_VISION
+    if re.search(r"\$\s?\d|\bbillion\b|\bmarket (size|opportunity)\b|\btam\b", lowered):
+        return ClaimType.MARKET_ESTIMATE
+    if re.search(r"\b(approved|approval|licensed|cleared|authoris|authoriz)\b", lowered):
+        return ClaimType.REGULATORY_APPROVAL
+    if re.search(r"\b(filed|submitted|pdufa|bla|nda|maa|under review)\b", lowered):
+        return ClaimType.REGULATORY_SUBMISSION
+    # Checked before the phase rule: "our Phase 1 success rate is 62%" is a
+    # claim about the company's history, not about where a programme sits.
+    if re.search(
+        r"\b(success rate|track record|probability of success|\bpos\b|versus industry|"
+        r"vs\.? industry|industry (standard|average|benchmark))\b",
+        lowered,
+    ):
+        return ClaimType.TRACK_RECORD
+    if re.search(r"\bphase\s*(1|2|3|4|i|ii|iii|iv)\b|registrational", lowered):
+        # A phase mention with a result is a result; without one it is a stage.
+        if re.search(r"\b(readout|met|achieved|demonstrated|showed|orr|survival)\b", lowered):
+            return ClaimType.CLINICAL_RESULT
+        return ClaimType.PIPELINE_STAGE
+    if re.search(r"\b(partnership|partnered|collaborat|licens(ed|ing) (to|with))\b", lowered):
+        return ClaimType.PARTNERSHIP
+    if re.search(
+        r"\b(patent|intellectual property|composition of matter|freedom to operate)\b", lowered
+    ):
+        return ClaimType.IP_POSITION
+    if re.search(r"\b(success rate|track record|probability of success|pos\b)\b", lowered):
+        return ClaimType.TRACK_RECORD
+    if re.search(r"\b(manufactur|cmc|gmp|cost of goods|scale-up|yield)\b", lowered):
+        return ClaimType.MANUFACTURING
+    if re.search(
+        r"\b(first-in-class|best-in-class|only approved|versus competitor|unlike)\b", lowered
+    ):
+        return ClaimType.COMPETITIVE_POSITION
+    if re.search(r"\b(platform|modular|our technology enables)\b", lowered):
+        return ClaimType.PLATFORM_CAPABILITY
+
+    return {
+        ClaimCategory.CLINICAL_EFFICACY: ClaimType.CLINICAL_RESULT,
+        ClaimCategory.PRECLINICAL_EFFICACY: ClaimType.PRECLINICAL_RESULT,
+        ClaimCategory.MECHANISM: ClaimType.MECHANISM,
+        ClaimCategory.SAFETY: ClaimType.SAFETY,
+        ClaimCategory.BIOMARKER: ClaimType.BIOMARKER,
+        ClaimCategory.PLATFORM: ClaimType.PLATFORM_CAPABILITY,
+        ClaimCategory.REGULATORY: ClaimType.REGULATORY_SUBMISSION,
+        ClaimCategory.IP: ClaimType.IP_POSITION,
+        ClaimCategory.MANUFACTURING: ClaimType.MANUFACTURING,
+        ClaimCategory.COMPETITIVE: ClaimType.COMPETITIVE_POSITION,
+        ClaimCategory.MARKET: ClaimType.MARKET_ESTIMATE,
+        ClaimCategory.TARGET_VALIDATION: ClaimType.MECHANISM,
+    }.get(category, ClaimType.OTHER)
+
+
+def _scientific_assessment(context: dict[str, Any], request: LLMRequest) -> dict[str, Any]:
+    unavailable = (
+        "Not assessed offline: this requires scientific reasoning over the retrieved "
+        "evidence. " + STUB_NOTE
+    )
+    return {
+        "biological_plausibility": unavailable,
+        "plausibility_confidence": ConfidenceLevel.LOW.value,
+        "modality_precedent": {
+            "modality": str(context.get("modality") or "not identified"),
+            "has_approved_precedent": False,
+            "precedent_summary": unavailable,
+            "notable_failures": [],
+        },
+        "first_in_class": unavailable,
+        "differentiation": unavailable,
+        "de_risking_achieved": unavailable,
+        "partnerability": unavailable,
+        "milestones_that_matter": [
+            "Configure a language-model provider and re-run to generate this analysis."
+        ],
+        "key_failure_mode": unavailable,
+    }
+
+
+def _scorecard_commentary(context: dict[str, Any], request: LLMRequest) -> dict[str, Any]:
+    dimensions = context.get("dimensions", []) or []
+    score = context.get("overall_score", 0.0)
+    return {
+        "headline": (
+            f"Composite scientific credibility is {score}/100. Narrative interpretation "
+            "requires a language-model provider; the scores themselves are computed "
+            "deterministically and are valid."
+        ),
+        "commentary": [
+            {
+                "dimension": str(d.get("dimension", "")),
+                "so_what": STUB_NOTE,
+                "what_would_change_it": (
+                    "Configure a language-model provider and re-run for dimension analysis."
+                ),
+            }
+            for d in dimensions
+        ],
+        "decisive_factors": [STUB_NOTE],
+    }
+
+
+_HANDLERS[S.ScientificAssessmentOut.__name__] = _scientific_assessment
+_HANDLERS[S.ScorecardCommentaryOut.__name__] = _scorecard_commentary

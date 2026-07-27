@@ -86,6 +86,14 @@ class Settings(BaseSettings):
     europepmc_base_url: str = "https://www.ebi.ac.uk/europepmc/webservices/rest"
     clinicaltrials_base_url: str = "https://clinicaltrials.gov/api/v2"
     openalex_base_url: str = "https://api.openalex.org"
+    #: openFDA is the authoritative source for U.S. approval status. No key is
+    #: required; a free key raises the rate limit from 240 to 1000 req/min.
+    openfda_base_url: str = "https://api.fda.gov"
+    openfda_api_key: str | None = None
+    #: Attempt authoritative verification of regulatory and pipeline claims.
+    regulatory_verification_enabled: bool = True
+    #: Max claims sent for authoritative verification in one run.
+    max_verification_claims: int = 30
 
     retrieval_enabled: bool = True
     retrieval_timeout_seconds: float = 30.0

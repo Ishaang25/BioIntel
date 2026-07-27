@@ -23,27 +23,39 @@ from typing import Any
 from sqlalchemy import select
 
 from app.analysis.adjudicator import Adjudicator, ClaimAdjudication
+from app.analysis.claim_policy import corroboration_guidance
+from app.analysis.corroboration import assess_corroboration, status_distribution
 from app.analysis.questions import RiskQuestionStage
 from app.analysis.rules import ClaimContext
 from app.analysis.rules import evaluate as evaluate_rules
 from app.analysis.rules import summarise as summarise_rules
+from app.analysis.scorecard import ScorecardInput, build_scorecard
 from app.analysis.scoring import (
     ClaimScoringInput,
     OverallScore,
     score_claim,
     score_run,
 )
+from app.analysis.verification import (
+    VERIFIABLE_TYPES,
+    RegulatoryVerifier,
+    VerificationRequest,
+    extract_asserted_phase,
+)
+from app.analysis.verification import summarise as summarise_verification
 from app.core.config import settings
 from app.core.enums import (
     STAGE_ORDER,
     STAGE_WEIGHTS,
     ClaimCategory,
+    ClaimType,
     EvidenceTier,
     PipelineStage,
     QuoteVerification,
     RunStatus,
     StageStatus,
     Stance,
+    VerificationStatus,
 )
 from app.core.errors import BioIntelError, PipelineError
 from app.core.logging import bind_run_context, clear_run_context, get_logger
@@ -67,6 +79,7 @@ from app.db.models import (
 )
 from app.db.session import session_scope
 from app.evidence.models import EvidenceRecord
+from app.evidence.normalization import expand_query_terms
 from app.evidence.retriever import EvidenceRetriever, RetrievalRequest
 from app.extraction.claims import ClaimExtractionStage, VerifiedClaim
 from app.extraction.entities import CompanyProfileStage, EntityExtractionStage
@@ -78,7 +91,7 @@ from app.extraction.page_understanding import (
 from app.ingestion.pdf_parser import parse_pdf
 from app.llm import prompts
 from app.llm.client import LLMClient
-from app.llm.schemas import ClaimVerdictOut, QueryPlanOut
+from app.llm.schemas import ClaimVerdictOut, QueryPlanOut, ScientificAssessmentOut
 from app.pipeline.context import RunContext
 from app.reporting.builder import ReferenceTable, ReportBuilder
 from app.reporting.renderer import render_markdown
@@ -109,11 +122,13 @@ class AnalysisPipeline:
         *,
         llm: LLMClient | None = None,
         retriever: EvidenceRetriever | None = None,
+        verifier: RegulatoryVerifier | None = None,
         should_cancel: Any = None,
         on_progress: Any = None,
     ) -> None:
         self.llm = llm
         self.retriever = retriever
+        self.verifier = verifier
         self._owns_llm = llm is None
         self._owns_retriever = retriever is None
         self._should_cancel = should_cancel or (lambda: False)
@@ -489,6 +504,7 @@ class AnalysisPipeline:
                     verbatim_quote=claim.verbatim_quote,
                     page_number=claim.page_number,
                     from_visual=verified.from_visual,
+                    claim_type=claim.claim_type,
                     category=claim.category,
                     claimed_evidence_tier=claim.claimed_evidence_tier,
                     quantitative=[q.model_dump(mode="json") for q in claim.quantitative],
@@ -614,7 +630,8 @@ class AnalysisPipeline:
                 claim_statement=claim.statement,
                 claim_category=_value(claim.category),
                 claimed_tier=_value(claim.claimed_evidence_tier),
-                entity_names=", ".join(claim.entity_names) or "(none identified)",
+                entity_names=", ".join(expand_query_terms(claim.entity_names, limit=10))
+                or "(none identified)",
                 company_context=company_context,
             ),
             schema=QueryPlanOut,
@@ -669,6 +686,8 @@ class AnalysisPipeline:
                 claim_statement=claim.statement,
                 claim_quote=claim.verbatim_quote,
                 claim_category=_value(claim.category),
+                claim_type=_value(claim.claim_type),
+                corroboration_guidance=corroboration_guidance(claim.claim_type),
                 claimed_tier=_value(claim.claimed_evidence_tier),
                 records=result.records,
             )
@@ -744,15 +763,31 @@ class AnalysisPipeline:
     async def _stage_assessment(self, context: RunContext, document: Document) -> None:
         assert context.claims is not None and self.llm is not None
 
+        # 1. Settle what can be settled authoritatively. Regulatory and
+        #    pipeline claims are checked against the FDA and the trial
+        #    registry, because the literature cannot answer them and treating
+        #    a PubMed miss as a negative finding is precisely the failure this
+        #    stage exists to prevent.
+        await self._verify_claims(context)
+
+        # 2. Decide what the evidence establishes, then score. Keeping these
+        #    separate is what lets "found nothing" and "found disagreement"
+        #    reach the score as different things.
         for index, verified in enumerate(context.claims.claims):
             claim_id = context.claim_ids.get(index)
             if claim_id is None:
                 continue
             scoring_input = _to_scoring_input(claim_id, verified)
             context.claim_inputs[claim_id] = scoring_input
-            context.claim_scores[claim_id] = score_claim(
-                scoring_input, context.adjudications.get(claim_id)
+
+            assessment = assess_corroboration(
+                claim_id=claim_id,
+                claim_type=scoring_input.claim_type,
+                adjudication=context.adjudications.get(claim_id),
+                verification=context.verifications.get(claim_id),
             )
+            context.corroborations[claim_id] = assessment
+            context.claim_scores[claim_id] = score_claim(scoring_input, assessment)
 
         # Narrative verdicts only for the claims an analyst will actually read.
         verdict_targets = sorted(
@@ -786,6 +821,7 @@ class AnalysisPipeline:
                 scoring=context.claim_inputs[claim_id],
                 score=score,
                 adjudication=context.adjudications.get(claim_id),
+                corroboration=context.corroborations.get(claim_id),
                 quote_match_score=_quote_score_for(context, claim_id),
                 from_visual=_from_visual(context, claim_id),
             )
@@ -800,16 +836,166 @@ class AnalysisPipeline:
             claims_needing_review=sum(1 for c in context.claims.claims if c.needs_human_review),
         )
 
+        # 3. Build the multi-dimensional IC scorecard. A single number cannot
+        #    tell a committee which risk it is taking.
+        context.scorecard = build_scorecard(
+            [
+                ScorecardInput(
+                    claim_id=claim_id,
+                    statement=_statement_for(context, claim_id),
+                    scoring=context.claim_inputs[claim_id],
+                    score=score,
+                    corroboration=context.corroborations.get(claim_id),
+                )
+                for claim_id, score in context.claim_scores.items()
+            ],
+            pipeline_size=len(context.profile.pipeline) if context.profile else 0,
+            development_stage=context.profile.development_stage if context.profile else None,
+            page_coverage=(
+                context.pages_with_content / context.page_count if context.page_count else 1.0
+            ),
+            marketing_claim_ratio=_marketing_ratio(context),
+        )
+
         context.record(
             PipelineStage.ASSESSMENT,
             {
-                "claims_scored": len(context.claim_scores),
+                "claims_scored": sum(1 for s in context.claim_scores.values() if s.scored),
+                "claims_excluded_by_type": sum(
+                    1 for s in context.claim_scores.values() if not s.scored
+                ),
                 "verdicts": len(context.verdicts),
                 "overall_score": context.overall.score,
                 "overall_band": context.overall.band.value,
                 "confidence": context.overall.confidence,
                 "bands": _band_histogram(context),
+                "corroboration": status_distribution(list(context.corroborations.values())),
+                "verification": summarise_verification(context.verifications),
+                "scorecard": {
+                    "archetype": context.scorecard.archetype.value,
+                    "overall": context.scorecard.overall_score,
+                    "recommendation": context.scorecard.recommendation.value,
+                    "dimensions": {
+                        d.dimension.value: d.score
+                        for d in context.scorecard.dimensions
+                        if d.assessed
+                    },
+                },
             },
+        )
+
+    async def _scientific_assessment(self, context: RunContext) -> None:
+        """Reason about the opportunity the way an investor does.
+
+        Runs before the memo so the report prompt can build on a considered
+        view of plausibility, precedent and differentiation rather than
+        deriving one inline while also managing citations.
+        """
+        assert self.llm is not None and context.claims is not None
+
+        thesis = [
+            v
+            for v in context.claims.claims
+            if v.claim.is_thesis_critical or v.claim.importance >= 0.7
+        ][:12]
+        if not thesis:
+            return
+
+        competitive = [
+            evidence
+            for adjudication in context.adjudications.values()
+            for evidence in adjudication.evidence
+            if evidence.stance is not Stance.UNRELATED
+        ][:20]
+
+        try:
+            context.scientific_assessment = await self.llm.structured(
+                purpose="scientific_assessment",
+                stage="report",
+                system=prompts.system(),
+                user=prompts.render(
+                    "scientific_assessment",
+                    company_context=_company_context(context),
+                    thesis_claims="\n".join(
+                        f"- [{_value(v.claim.claim_type)}] {v.claim.statement}" for v in thesis
+                    ),
+                    evidence_digest=_format_evidence_digest(context),
+                    competitive_records=(
+                        "\n".join(
+                            f"- {e.record.short_citation()}: {truncate(e.record.title, 160)}"
+                            for e in competitive
+                        )
+                        or "(no competitive records were retrieved)"
+                    ),
+                ),
+                schema=ScientificAssessmentOut,
+                model=settings.model_reasoning,
+                context={"modality": (context.profile.modality if context.profile else None)},
+            )
+        except Exception as exc:
+            log.warning("scientific_assessment.failed", error=str(exc)[:300])
+            context.warn("The scientific reasoning pass failed; the memo was written without it.")
+
+    async def _verify_claims(self, context: RunContext) -> None:
+        """Check regulatory and pipeline claims against authoritative sources."""
+        assert context.claims is not None
+        if not settings.regulatory_verification_enabled:
+            return
+
+        company = context.profile.company_name if context.profile else None
+        requests: list[VerificationRequest] = []
+
+        for index, verified in enumerate(context.claims.claims):
+            claim_id = context.claim_ids.get(index)
+            if claim_id is None:
+                continue
+            claim_type = verified.claim.claim_type
+            if claim_type not in VERIFIABLE_TYPES:
+                continue
+
+            # Alias expansion is what makes this work: a deck saying
+            # "mRNA-1345" must reach records filed under "mRESVIA".
+            names = expand_query_terms(
+                [*verified.claim.entity_names, verified.claim.statement.split(".")[0]],
+                limit=6,
+            )
+            requests.append(
+                VerificationRequest(
+                    claim_id=claim_id,
+                    claim_type=claim_type,
+                    statement=verified.claim.statement,
+                    product_names=names,
+                    company_name=company,
+                    asserted_phase=extract_asserted_phase(verified.claim.statement),
+                    indication=(context.profile.lead_indication if context.profile else None),
+                )
+            )
+
+        if not requests:
+            return
+
+        verifier = self.verifier or RegulatoryVerifier()
+        owns = self.verifier is None
+        try:
+            context.verifications = await verifier.verify_many(requests)
+        except Exception as exc:
+            log.warning("verification.stage_failed", error=str(exc)[:300])
+            context.warn(
+                "Authoritative regulatory verification could not be completed; affected "
+                "claims are recorded as not independently verified."
+            )
+        finally:
+            if owns:
+                await verifier.aclose()
+
+        decisive = sum(1 for v in context.verifications.values() if v.is_decisive)
+        log.info(
+            "verification.completed",
+            attempted=len(requests),
+            decisive=decisive,
+            refuted=sum(
+                1 for v in context.verifications.values() if v.status is VerificationStatus.REFUTED
+            ),
         )
 
     async def _claim_verdict(
@@ -818,6 +1004,7 @@ class AnalysisPipeline:
         assert self.llm is not None
         adjudication = context.adjudications.get(claim_id)
         scoring = context.claim_inputs[claim_id]
+        verification = context.verifications.get(claim_id)
         statement = _statement_for(context, claim_id)
         quote = _quote_for(context, claim_id)
 
@@ -829,8 +1016,15 @@ class AnalysisPipeline:
                 "claim_verdict",
                 claim_statement=statement,
                 claim_quote=truncate(quote, 400),
+                claim_type=_value(scoring.claim_type),
                 claimed_tier=scoring.claimed_tier.value,
                 claim_category=scoring.category.value,
+                corroboration_guidance=corroboration_guidance(scoring.claim_type),
+                verification_summary=(
+                    verification.detail
+                    if verification
+                    else "No authoritative source was consulted for this claim."
+                ),
                 supporting_count=score.supporting_count,
                 contradicting_count=score.contradicting_count,
                 neutral_count=score.neutral_count,
@@ -844,6 +1038,12 @@ class AnalysisPipeline:
                 "contradicting_count": score.contradicting_count,
                 "evidence_count": len(adjudication.evidence) if adjudication else 0,
                 "claimed_evidence_tier": scoring.claimed_tier.value,
+                "claim_type": _value(scoring.claim_type),
+                "null_status": (
+                    context.corroborations[claim_id].status.value
+                    if claim_id in context.corroborations
+                    else "insufficient_evidence"
+                ),
             },
         )
 
@@ -854,12 +1054,24 @@ class AnalysisPipeline:
                 verdict = context.verdicts.get(claim_id)
                 best_support = adjudication.best(Stance.SUPPORTS) if adjudication else None
                 best_contra = adjudication.best(Stance.CONTRADICTS) if adjudication else None
+                corroboration = context.corroborations.get(claim_id)
+                verification = context.verifications.get(claim_id)
                 session.add(
                     ClaimAssessment(
                         run_id=context.run_id,
                         claim_id=claim_id,
                         credibility_score=score.credibility_score,
                         credibility_band=score.band,
+                        corroboration_status=score.corroboration,
+                        corroboration_rationale=(corroboration.rationale if corroboration else ""),
+                        is_scorable=score.scored,
+                        score_explanation=score.explanation,
+                        verification_status=(verification.status.value if verification else None),
+                        verification_source=verification.source if verification else None,
+                        verification_detail=verification.detail if verification else None,
+                        verification_identifiers=(
+                            verification.identifiers[:10] if verification else []
+                        ),
                         confidence=score.confidence,
                         supporting_count=score.supporting_count,
                         contradicting_count=score.contradicting_count,
@@ -936,6 +1148,7 @@ class AnalysisPipeline:
 
     async def _stage_report(self, context: RunContext, document: Document) -> None:
         assert self.llm is not None
+        await self._scientific_assessment(context)
         summaries, _ = _claim_summaries(context)
         references = _build_references(context, summaries)
         context.references = references
@@ -955,6 +1168,8 @@ class AnalysisPipeline:
             questions=questions,
             references=references,
             extra_limitations=context.warnings,
+            scorecard=context.scorecard,
+            scientific_assessment=context.scientific_assessment,
         )
         context.report = report
 
@@ -963,6 +1178,7 @@ class AnalysisPipeline:
             company_name=context.profile.company_name if context.profile else None,
             document_name=document.filename,
             degraded=context.degraded,
+            scorecard=(context.scorecard.to_dict() if context.scorecard else None),
         )
 
         with session_scope() as session:
@@ -977,6 +1193,15 @@ class AnalysisPipeline:
                     confidence=report.confidence,
                     recommendation=report.recommendation,
                     score_breakdown=report.score_breakdown,
+                    scorecard=(context.scorecard.to_dict() if context.scorecard else {}),
+                    scientific_assessment=(
+                        context.scientific_assessment.model_dump(mode="json")
+                        if context.scientific_assessment is not None
+                        else {}
+                    ),
+                    ic_recommendation=(
+                        context.scorecard.recommendation.value if context.scorecard else None
+                    ),
                     citations=report.citations,
                     markdown=markdown,
                     limitations=report.limitations,
@@ -1063,6 +1288,11 @@ def _to_scoring_input(claim_id: str, verified: VerifiedClaim) -> ClaimScoringInp
     quantities = claim.quantitative
     return ClaimScoringInput(
         claim_id=claim_id,
+        claim_type=(
+            claim.claim_type
+            if isinstance(claim.claim_type, ClaimType)
+            else ClaimType(str(claim.claim_type))
+        ),
         category=(
             claim.category if isinstance(claim.category, ClaimCategory) else ClaimCategory.OTHER
         ),
@@ -1162,7 +1392,18 @@ def _claim_summaries(context: RunContext) -> tuple[list[dict[str, Any]], dict[st
                 "statement": verified.claim.statement,
                 "quote": verified.claim.verbatim_quote,
                 "page_number": verified.claim.page_number,
+                "claim_type": _value(verified.claim.claim_type),
                 "category": _value(verified.claim.category),
+                "corroboration_status": (
+                    context.corroborations[claim_id].status.value
+                    if claim_id in context.corroborations
+                    else None
+                ),
+                "corroboration_rationale": (
+                    context.corroborations[claim_id].rationale
+                    if claim_id in context.corroborations
+                    else ""
+                ),
                 "claimed_tier": _value(verified.claim.claimed_evidence_tier),
                 "is_thesis_critical": verified.claim.is_thesis_critical,
                 "importance": verified.claim.importance,
@@ -1440,3 +1681,51 @@ def _progress_after(stage: PipelineStage) -> float:
 
 def _elapsed_ms(since: dt.datetime) -> int:
     return int((dt.datetime.now(dt.UTC) - since).total_seconds() * 1000)
+
+
+def _marketing_ratio(context: RunContext) -> float:
+    """Share of extracted statements that are promotional or forward-looking.
+
+    A signal about the deck rather than the science: it feeds disclosure
+    quality and never touches credibility.
+    """
+    if not context.claim_inputs:
+        return 0.0
+    unscorable = sum(
+        1
+        for claim in context.claim_inputs.values()
+        if claim.claim_type
+        in (
+            ClaimType.MARKETING,
+            ClaimType.CORPORATE_VISION,
+            ClaimType.STRATEGIC_OBJECTIVE,
+            ClaimType.FORWARD_LOOKING,
+            ClaimType.FINANCIAL_GUIDANCE,
+            ClaimType.MARKET_ESTIMATE,
+        )
+    )
+    return round(unscorable / len(context.claim_inputs), 4)
+
+
+def _format_evidence_digest(context: RunContext, limit: int = 18) -> str:
+    """The strongest retrieved evidence, graded, for the reasoning prompt."""
+    from app.evidence.grading import grade_record
+
+    rows: list[tuple[float, str]] = []
+    for adjudication in context.adjudications.values():
+        for evidence in adjudication.evidence:
+            if evidence.stance is Stance.UNRELATED:
+                continue
+            graded = grade_record(evidence.record)
+            rows.append(
+                (
+                    graded.weight * evidence.relevance,
+                    f"- [{graded.grade.value}] ({evidence.stance.value}) "
+                    f"{evidence.record.short_citation()}: "
+                    f"{truncate(evidence.record.title, 150)}",
+                )
+            )
+    rows.sort(key=lambda pair: pair[0], reverse=True)
+    if not rows:
+        return "(no external evidence was retrieved)"
+    return "\n".join(row for _, row in rows[:limit])

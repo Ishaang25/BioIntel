@@ -20,6 +20,28 @@ if config.config_file_name is not None:
 target_metadata = Base.metadata
 
 
+def render_item(type_: str, obj: object, autogen_context: object) -> str | bool:
+    """Render application column types as their underlying SQL types.
+
+    A migration is a frozen historical record and must not depend on the
+    current definition of an application class.  ``EnumType(RunStatus, 32)``
+    would render as an un-constructable ``EnumType()`` and would also break if
+    the enum were later renamed; the DDL it produces is just ``VARCHAR(32)``,
+    so that is what the migration records.
+    """
+    if type_ != "type":
+        return False
+
+    from app.db.base import EnumType, StringList
+
+    if isinstance(obj, EnumType):
+        return f"sa.String(length={obj.impl.length})"
+    if isinstance(obj, StringList):
+        autogen_context.imports.add("import sqlalchemy as sa")  # type: ignore[attr-defined]
+        return "sa.JSON()"
+    return False
+
+
 def run_migrations_offline() -> None:
     context.configure(
         url=settings.database_url,
@@ -27,6 +49,7 @@ def run_migrations_offline() -> None:
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
         compare_type=True,
+        render_item=render_item,
         render_as_batch=settings.is_sqlite,
     )
     with context.begin_transaction():
@@ -44,6 +67,7 @@ def run_migrations_online() -> None:
             connection=connection,
             target_metadata=target_metadata,
             compare_type=True,
+            render_item=render_item,
             render_as_batch=settings.is_sqlite,
         )
         with context.begin_transaction():

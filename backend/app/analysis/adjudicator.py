@@ -104,6 +104,8 @@ class Adjudicator:
         claim_category: str,
         claimed_tier: str,
         records: list[ScoredRecord],
+        claim_type: str = "other",
+        corroboration_guidance: str = "",
     ) -> ClaimAdjudication:
         result = ClaimAdjudication(claim_id=claim_id)
         if not records:
@@ -116,6 +118,8 @@ class Adjudicator:
                     claim_statement=claim_statement,
                     claim_quote=claim_quote,
                     claim_category=claim_category,
+                    claim_type=claim_type,
+                    corroboration_guidance=corroboration_guidance,
                     claimed_tier=claimed_tier,
                     batch=batch,
                     batch_index=index,
@@ -143,6 +147,8 @@ class Adjudicator:
         claim_statement: str,
         claim_quote: str,
         claim_category: str,
+        claim_type: str,
+        corroboration_guidance: str,
         claimed_tier: str,
         batch: list[ScoredRecord],
         batch_index: int,
@@ -159,6 +165,10 @@ class Adjudicator:
                 claim_statement=claim_statement,
                 claim_quote=truncate(claim_quote, 600),
                 claim_category=claim_category,
+                claim_type=claim_type,
+                corroboration_guidance=(
+                    corroboration_guidance or "No specific corroboration guidance available."
+                ),
                 claimed_tier=claimed_tier,
                 evidence=_format_evidence(prompt_records),
             ),

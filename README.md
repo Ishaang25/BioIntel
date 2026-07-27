@@ -83,10 +83,59 @@ Set `OPENAI_API_KEY` in `.env` and re-run to get the full analysis.
 | **Entities** | Diseases, targets, drugs, biomarkers, mechanisms, modalities, endpoints, assays and model systems, deduplicated and ranked by salience. |
 | **Evidence** | Real records from PubMed, Europe PMC and ClinicalTrials.gov, deduplicated across sources and ranked by relevance and study quality. |
 | **Adjudications** | Per claim × record: supports / contradicts / mixed / neutral / unrelated, with a verified quote from the abstract and explicit caveats. |
-| **Scores** | Per-claim credibility 0–100 with a full component breakdown, plus a composite score weighted by claim importance and category. |
+| **Verification** | Regulatory and pipeline claims checked against openFDA and ClinicalTrials.gov, with confirmed / refuted / could-not-check reported separately. |
+| **Scores** | Per-claim credibility 0–100 with a full component breakdown and a plain-language explanation, plus a ten-dimension IC scorecard and a scientific-diligence recommendation. |
 | **Risks** | Deterministic rule findings (translational gaps, missing controls, terminated trials at the same target, retracted citations) merged with model-generated risks. |
 | **Questions** | 8–15 specific technical questions for the company, each with a rationale and what a good answer contains. |
 | **IC memo** | An eight-section cited memo, exportable as Markdown or standalone HTML. |
+
+---
+
+## How claims are scored
+
+Scoring is the part of BioIntel most worth understanding, because the naive
+version of it is actively misleading.
+
+**Claim type decides the model.** A regulatory approval, a mouse result and a
+revenue projection are epistemically different objects and do not share a
+scoring model. Each type carries its own prior and its own sensitivity to
+evidence. Statements that cannot be true or false today — guidance, plans,
+corporate vision, marketing — are extracted, reported, and **excluded from
+credibility scoring**. A company is not marked down for having a strategy.
+
+**Absence of evidence is never evidence against.** The system distinguishes
+seven outcomes of trying to check a claim:
+
+| Status | Meaning | Score effect |
+|---|---|---|
+| Corroborated | independent evidence confirms it | strongly positive |
+| Partly corroborated | direction confirmed, a specific is not | positive |
+| Plausible, unverified | consistent with the literature, not confirmed | slightly positive |
+| **No evidence found** | the search ran and returned nothing on point | **none** |
+| **Not independently verified** | only a regulator or the company could confirm it | **none** |
+| Disputed | evidence points both ways | negative |
+| Contradicted | evidence genuinely disagrees | strongly negative |
+
+Only the last two can reduce a score below its prior.
+
+**Evidence is weighted by what it can establish.** Records are graded on an
+explicit hierarchy — regulatory approval > pivotal trial in a top-tier journal
+> meta-analysis > pivotal trial > Phase 2 > registry record > preclinical >
+narrative review > preprint > conference abstract. Three narrative reviews
+cannot corroborate a clinical result.
+
+**Regulatory claims go to regulators, not to PubMed.** Approval, submission and
+pipeline-stage claims are checked against openFDA and ClinicalTrials.gov, which
+can actually settle them. A registry that positively disagrees with a deck's
+stated phase is a real finding; a source that does not cover the product class
+is a coverage gap, and the memo says which.
+
+**The output is a scorecard, not a number.** Ten dimensions — scientific
+validity, clinical maturity, regulatory confidence, evidence quality, execution
+credibility, platform strength, pipeline diversification, translational
+readiness, commercial readiness, disclosure quality — each with a confidence
+band and the findings that drove it, weighted by company archetype. Dimensions
+with no informing claims read as *not assessed*, never zero.
 
 ---
 
@@ -126,6 +175,8 @@ for the annotated list. The ones that matter most:
 | `OPENAI_API_KEY` | — | Enables the full analysis. Without it, degraded mode. |
 | `DATABASE_URL` | SQLite under `STORAGE_DIR` | Use PostgreSQL for anything shared. |
 | `NCBI_API_KEY` | — | Raises the PubMed rate limit from 3 to 10 req/s. [Free.](https://www.ncbi.nlm.nih.gov/account/settings/) |
+| `OPENFDA_API_KEY` | — | Raises the openFDA rate limit from 240 to 1000 req/min. [Free.](https://open.fda.gov/apis/authentication/) |
+| `REGULATORY_VERIFICATION_ENABLED` | `true` | Check regulatory and pipeline claims against authoritative sources. |
 | `JOB_EXECUTION_MODE` | `worker` | `inline` runs analyses in the API process (single user). |
 | `API_KEYS` | — | Comma-separated keys. Empty disables auth; refused in production. |
 | `LLM_MAX_CALLS_PER_RUN` | 400 | Hard cost ceiling per analysis. |
@@ -188,8 +239,14 @@ finished investment opinion. In particular:
 - Retrieval is keyword-driven. A claim about proprietary unpublished work will
   correctly return nothing, and that is reported as absence of evidence.
 - Values read from charts carry reading error and are flagged as estimated.
-- The corpus is PubMed, Europe PMC and ClinicalTrials.gov: no patents, no
-  conference abstracts, no non-US/EU trial registries.
+- The corpus is PubMed, Europe PMC, ClinicalTrials.gov and openFDA: no
+  patents, no conference abstracts, no EMA database, no non-US/EU registries.
+- openFDA's Drugs@FDA dataset does not index CBER-licensed vaccines, so those
+  approvals resolve to *not independently verified* rather than confirmed.
+- Scoring priors encode a defensible view of how different kinds of claim
+  should be treated before evidence, but they are a view. They live in one
+  readable table (`app/analysis/claim_policy.py`) precisely so they can be
+  argued with.
 - Scoring weights encode a defensible view of evidence hierarchy, but they are
   a view. The full breakdown is exposed so it can be argued with.
 

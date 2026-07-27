@@ -69,6 +69,35 @@ def _merge_all_of(node: dict[str, Any]) -> dict[str, Any]:
     return merged
 
 
+def _resolve_ref_siblings(node: dict[str, Any], defs: dict[str, Any]) -> dict[str, Any]:
+    """Remove ``$ref`` nodes that carry sibling keywords.
+
+    OpenAI's strict dialect rejects ``{"$ref": ..., "description": ...}`` with
+    "$ref cannot have keywords". Pydantic emits exactly that whenever an enum
+    field carries a ``Field(description=...)``, which is every enum field we
+    define, so without this the whole schema is refused and every call silently
+    degrades to non-strict decoding.
+
+    Enums are inlined, which keeps the per-field description *and* satisfies
+    the dialect. Object references cannot be inlined safely (they may recurse),
+    so their sibling keywords are dropped and the bare ``$ref`` is kept.
+    """
+    ref = node.get("$ref")
+    siblings = {k: v for k, v in node.items() if k != "$ref"}
+    if not ref or not siblings:
+        return node
+
+    target = defs.get(ref.rsplit("/", 1)[-1], {})
+    # A definition with no properties is a scalar/enum and is safe to inline.
+    if target and "properties" not in target:
+        inlined = {k: v for k, v in target.items() if k != "title"}
+        # The field's own description is more specific than the type's.
+        inlined.update(siblings)
+        return inlined
+
+    return {"$ref": ref}
+
+
 def _describe_constraints(node: dict[str, Any]) -> str:
     hints = [
         template.format(v=node[key]) for key, template in _CONSTRAINT_HINTS.items() if key in node
@@ -82,11 +111,13 @@ _SCHEMA_MAP_KEYS = {"properties", "$defs", "definitions"}
 _SCHEMA_LIST_KEYS = {"anyOf", "oneOf"}
 
 
-def _normalize(node: Any) -> Any:
+def _normalize(node: Any, defs: dict[str, Any] | None = None) -> Any:
     if not isinstance(node, dict):
         return node
 
+    defs = defs if defs is not None else {}
     node = _merge_all_of(dict(node))
+    node = _resolve_ref_siblings(node, defs)
 
     hint = _describe_constraints(node)
     if hint:
@@ -97,15 +128,15 @@ def _normalize(node: Any) -> Any:
         if key not in _ALLOWED_KEYS:
             continue
         if key in _SCHEMA_MAP_KEYS and isinstance(value, dict):
-            cleaned[key] = {k: _normalize(v) for k, v in value.items()}
+            cleaned[key] = {k: _normalize(v, defs) for k, v in value.items()}
         elif key in _SCHEMA_LIST_KEYS and isinstance(value, list):
-            cleaned[key] = [_normalize(v) for v in value]
+            cleaned[key] = [_normalize(v, defs) for v in value]
         elif key in {"enum", "required"}:
             cleaned[key] = value
         elif key == "items":
-            cleaned[key] = _normalize(value)
+            cleaned[key] = _normalize(value, defs)
         else:
-            cleaned[key] = _normalize(value) if isinstance(value, dict) else value
+            cleaned[key] = _normalize(value, defs) if isinstance(value, dict) else value
 
     if cleaned.get("properties") is not None:
         cleaned["type"] = cleaned.get("type", "object")
@@ -123,7 +154,8 @@ def _normalize(node: Any) -> Any:
 def to_strict_schema(model: type[BaseModel]) -> dict[str, Any]:
     """Return a strict-mode JSON Schema for ``model``."""
     raw = copy.deepcopy(model.model_json_schema(ref_template="#/$defs/{model}"))
-    schema = _normalize(raw)
+    schema = _normalize(raw, raw.get("$defs", {}))
+    schema = _prune_unused_defs(schema)
     if schema.get("type") != "object":
         raise ValueError(f"{model.__name__} must serialise to a JSON object")
     schema.pop("title", None)
@@ -153,3 +185,49 @@ def describe_schema_for_prompt(model: type[BaseModel]) -> str:
 
     walk(schema.get("properties", {}))
     return "\n".join(lines)
+
+
+def _prune_unused_defs(schema: dict[str, Any]) -> dict[str, Any]:
+    """Drop ``$defs`` entries no longer referenced after enum inlining.
+
+    Strict mode rejects a schema containing definitions nothing points at.
+    """
+    defs = schema.get("$defs")
+    if not defs:
+        return schema
+
+    referenced: set[str] = set()
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            ref = node.get("$ref")
+            if isinstance(ref, str):
+                referenced.add(ref.rsplit("/", 1)[-1])
+            for key, value in node.items():
+                if key != "$defs":
+                    walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk({k: v for k, v in schema.items() if k != "$defs"})
+
+    # A retained definition may itself reference others; close over them.
+    changed = True
+    while changed:
+        changed = False
+        for name in list(referenced):
+            target = defs.get(name)
+            if target is None:
+                continue
+            before = len(referenced)
+            walk(target)
+            if len(referenced) != before:
+                changed = True
+
+    kept = {name: body for name, body in defs.items() if name in referenced}
+    if kept:
+        schema["$defs"] = kept
+    else:
+        schema.pop("$defs", None)
+    return schema
