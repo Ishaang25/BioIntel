@@ -1,0 +1,92 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "biointel"
+version = "0.1.0"
+description = "Scientific due diligence for biotech venture investing"
+readme = "../README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.5",
+    "sqlalchemy>=2.0.35",
+    "alembic>=1.13",
+    "httpx>=0.27",
+    "openai>=1.99",
+    "pymupdf>=1.24",
+    "python-multipart>=0.0.9",
+    "tenacity>=9.0",
+    "structlog>=24.4",
+    "orjson>=3.10",
+    "markdown-it-py>=3.0",
+    "rapidfuzz>=3.9",
+    "numpy>=1.26",
+    "python-dateutil>=2.9",
+]
+
+[project.optional-dependencies]
+postgres = ["psycopg[binary]>=3.2"]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=5.0",
+    "respx>=0.21",
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "types-python-dateutil",
+]
+
+[project.scripts]
+biointel-worker = "app.jobs.worker:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
+
+[tool.setuptools.package-data]
+app = ["llm/prompts/*.md", "reporting/templates/*.html"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+filterwarnings = ["ignore::DeprecationWarning"]
+addopts = "-q --strict-markers"
+markers = [
+    "integration: tests that exercise multiple layers end to end",
+    "network: tests that require outbound network access (skipped by default)",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["."]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "C4", "SIM", "RUF"]
+ignore = ["B008", "RUF012"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E501"]
+# Field descriptions are instructions to the model; wrapping them at 100 chars
+# hurts readability more than the long line does.
+"app/llm/schemas.py" = ["E501"]
+"app/llm/stub_provider.py" = ["E501"]
+"app/analysis/rules.py" = ["E501"]
+# The PDF character translation table is deliberately full of look-alike
+# glyphs -- that is exactly what it exists to normalise.
+"app/utils/text.py" = ["RUF001"]
+"app/extraction/lexicon.py" = ["E501", "RUF001"]
+
+[tool.mypy]
+python_version = "3.11"
+plugins = ["pydantic.mypy"]
+ignore_missing_imports = true
+disallow_untyped_defs = false
+warn_unused_ignores = false

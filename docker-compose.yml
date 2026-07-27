@@ -1,0 +1,107 @@
+# BioIntel — full stack.
+#
+#   docker compose up --build
+#
+# Brings up PostgreSQL, the API, a background worker and the web app.
+# Everything works without an OPENAI_API_KEY; analyses are simply marked
+# degraded until one is supplied.
+
+name: biointel
+
+x-backend-env: &backend-env
+  DATABASE_URL: postgresql+psycopg://biointel:biointel@postgres:5432/biointel
+  STORAGE_DIR: /data
+  ENVIRONMENT: ${ENVIRONMENT:-local}
+  LOG_JSON: ${LOG_JSON:-true}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+  MODEL_REASONING: ${MODEL_REASONING:-gpt-5}
+  MODEL_FAST: ${MODEL_FAST:-gpt-5-mini}
+  MODEL_VISION: ${MODEL_VISION:-gpt-5}
+  NCBI_API_KEY: ${NCBI_API_KEY:-}
+  NCBI_TOOL_EMAIL: ${NCBI_TOOL_EMAIL:-engineering@example.com}
+  RETRIEVAL_ENABLED: ${RETRIEVAL_ENABLED:-true}
+  API_KEYS: ${API_KEYS:-}
+  SECRET_KEY: ${SECRET_KEY:-dev-insecure-secret-change-me}
+  JOB_EXECUTION_MODE: worker
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: biointel
+      POSTGRES_PASSWORD: biointel
+      POSTGRES_DB: biointel
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U biointel -d biointel"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  # Migrations run once, before the API and worker start, so both always see
+  # a schema that matches the code they were built from.
+  migrate:
+    build:
+      context: ./backend
+    environment: *backend-env
+    command: ["alembic", "upgrade", "head"]
+    volumes:
+      - storage-data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build:
+      context: ./backend
+    environment:
+      <<: *backend-env
+      CORS_ORIGINS: http://localhost:3000,http://127.0.0.1:3000
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - storage-data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ./backend
+    environment: *backend-env
+    command: ["biointel-worker"]
+    volumes:
+      - storage-data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+
+  web:
+    build:
+      context: ./frontend
+    environment:
+      BIOINTEL_API_URL: http://api:8000
+      BIOINTEL_API_KEY: ${BIOINTEL_API_KEY:-}
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  storage-data:
