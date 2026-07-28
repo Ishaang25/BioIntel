@@ -27,6 +27,7 @@ from app.reporting.narrative import (
     rank_questions,
     recommendation_drivers,
 )
+from app.utils.dedupe import dedupe_strings
 from app.utils.text import truncate
 
 log = get_logger(__name__)
@@ -290,7 +291,7 @@ class ReportBuilder:
             executive_summary=_render_executive_summary(output.executive_summary),
             sections=sections,
             recommendation=output.recommendation,
-            limitations=_dedupe_strings(limitations),
+            limitations=dedupe_strings(limitations, case_sensitive=False),
             citations=references.citations(sorted(used_refs, key=_ref_sort_key)),
             overall_score=overall.score,
             overall_band=overall.band,
@@ -624,34 +625,11 @@ def _format_risks(risks: list[Risk]) -> str:
     )
 
 
-def _format_questions(questions: list[Question]) -> str:
-    if not questions:
-        return "(no diligence questions were generated)"
-    return "\n".join(
-        f"{index + 1}. [{q.priority.value}/{q.category.value}] {q.question}"
-        f"\n    why: {truncate(q.rationale, 260)}"
-        f"\n    good answer: {truncate(q.what_good_looks_like, 260)}"
-        for index, q in enumerate(questions)
-    )
-
-
 def _ref_sort_key(ref: str) -> tuple[str, int]:
     match = re.match(r"([CE])(\d+)", ref)
     if not match:
         return (ref, 0)
     return (match.group(1), int(match.group(2)))
-
-
-def _dedupe_strings(values: list[str]) -> list[str]:
-    seen: set[str] = set()
-    out: list[str] = []
-    for value in values:
-        key = value.strip().lower()
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        out.append(value.strip())
-    return out
 
 
 def _value(enum_or_str: Any) -> str:
