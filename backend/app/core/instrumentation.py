@@ -153,74 +153,81 @@ class RunMetrics:
         for stage in self.stages:
             stage_minutes, stage_secs = divmod(int(stage.duration_ms / 1000), 60)
             stage_str = (
-                f"{stage_minutes}m {stage_secs:02d}s"
-                if stage_minutes > 0
-                else f"{stage_secs}s"
+                f"{stage_minutes}m {stage_secs:02d}s" if stage_minutes > 0 else f"{stage_secs}s"
             )
             lines.append(f"| {stage.stage} | {stage_str} | {stage.status} |")
 
-        lines.extend([
-            "",
-            f"**Total Runtime:** {duration_str}",
-            "",
-            "## Document & Extraction",
-            "",
-            f"- Pages: {self.pages_total} ({self.pages_with_content} with content)",
-            f"- OCR Required: {'Yes' if self.requires_ocr else 'No'}",
-            f"- Entities: {self.entities_extracted} (dedup: {self.entities_deduped})",
-            f"- Claims: {self.claims_total} (scored: {self.claims_scored})",
-            "",
-            "## Evidence & Verification",
-            "",
-            f"- Evidence Records Retrieved: {self.evidence_retrieved}",
-            f"- Unique Sources: {self.unique_sources}",
-            f"- Claims Corroborated: {self.claims_corroborated}",
-            f"- Claims Contradicted: {self.claims_contradicted}",
-            f"- Claims Unverified: {self.claims_unverified}",
-            f"- Verification Coverage: {self.verification_coverage * 100:.1f}%",
-            f"- Assessment Confidence: {self.assessment_confidence:.2f}",
-            "",
-            "## Model Usage",
-            "",
-            f"- Provider: {self.llm_provider or 'none (offline mode)'}",
-            f"- LLM Calls: {self.total_llm_calls}",
-            f"- Input Tokens: {self.total_input_tokens:,}",
-            f"- Completion Tokens: {self.total_completion_tokens:,}",
-            f"- Cached Tokens: {self.total_cached_tokens:,}",
-            f"- Total Tokens: {self.total_input_tokens + self.total_completion_tokens:,}",
-            f"- Total Latency: {self.total_llm_latency_ms / 1000:.1f}s",
-            "",
-            "## Cost (USD)",
-            "",
-            f"- Input: ${self.estimated_input_cost:.2f}",
-            f"- Completion: ${self.estimated_completion_cost:.2f}",
-            f"- Reasoning: ${self.estimated_reasoning_cost:.2f}",
-            f"- **Total: ${self.total_estimated_cost:.2f}**",
-            "",
-            "## Report",
-            "",
-            f"- Sections: {self.report_sections}",
-            f"- Length: {self.report_length_chars:,} characters",
-            f"- References: {self.references_count}",
-            f"- Questions: {self.questions_count}",
-            "",
-        ])
+        lines.extend(
+            [
+                "",
+                f"**Total Runtime:** {duration_str}",
+                "",
+                "## Document & Extraction",
+                "",
+                f"- Pages: {self.pages_total} ({self.pages_with_content} with content)",
+                f"- OCR Required: {'Yes' if self.requires_ocr else 'No'}",
+                f"- Entities: {self.entities_extracted} (dedup: {self.entities_deduped})",
+                f"- Claims: {self.claims_total} (scored: {self.claims_scored})",
+                "",
+                "## Evidence & Verification",
+                "",
+                f"- Evidence Records Retrieved: {self.evidence_retrieved}",
+                f"- Unique Sources: {self.unique_sources}",
+                f"- Claims Corroborated: {self.claims_corroborated}",
+                f"- Claims Contradicted: {self.claims_contradicted}",
+                f"- Claims Unverified: {self.claims_unverified}",
+                f"- Verification Coverage: {self.verification_coverage * 100:.1f}%",
+                f"- Assessment Confidence: {self.assessment_confidence:.2f}",
+                "",
+                "## Model Usage",
+                "",
+                f"- Provider: {self.llm_provider or 'none (offline mode)'}",
+                f"- LLM Calls: {self.total_llm_calls}",
+                f"- Input Tokens: {self.total_input_tokens:,}",
+                f"- Completion Tokens: {self.total_completion_tokens:,}",
+                f"- Cached Tokens: {self.total_cached_tokens:,}",
+                f"- Total Tokens: {self.total_input_tokens + self.total_completion_tokens:,}",
+                f"- Total Latency: {self.total_llm_latency_ms / 1000:.1f}s",
+                "",
+                "## Cost (USD)",
+                "",
+                f"- Input (incl. cached): ${self.estimated_input_cost:.4f}",
+                f"- Completion: ${self.estimated_completion_cost:.4f}",
+                # Reasoning tokens bill at the completion rate and are already
+                # counted in the completion figure above; shown for visibility.
+                f"  - of which reasoning: ${self.estimated_reasoning_cost:.4f}",
+                f"- **Total: ${self.total_estimated_cost:.4f}**",
+                "",
+                "## Report",
+                "",
+                f"- Sections: {self.report_sections}",
+                f"- Length: {self.report_length_chars:,} characters",
+                f"- References: {self.references_count}",
+                f"- Questions: {self.questions_count}",
+                "",
+            ]
+        )
 
         if self.degraded:
-            lines.extend([
-                "## ⚠️ Degraded Mode",
-                "",
-                "This analysis ran without an LLM provider and used BioIntel's deterministic ",
-                "offline analyzer. Chart reading, figure interpretation, and semantic evidence ",
-                "adjudication were not performed.",
-                "",
-            ])
+            lines.extend(
+                [
+                    "## ⚠️ Degraded Mode",
+                    "",
+                    "This analysis ran without an LLM provider and used BioIntel's "
+                    "deterministic offline analyzer. Chart reading, figure "
+                    "interpretation, and semantic evidence adjudication were not "
+                    "performed.",
+                    "",
+                ]
+            )
 
         if self.warnings:
-            lines.extend([
-                "## Warnings",
-                "",
-            ])
+            lines.extend(
+                [
+                    "## Warnings",
+                    "",
+                ]
+            )
             for warning in self.warnings:
                 lines.append(f"- {warning}")
             lines.append("")
@@ -233,66 +240,3 @@ class RunMetrics:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(self.to_summary_markdown(), encoding="utf-8")
         log.info("instrumentation.summary_saved", path=str(path))
-
-
-class MetricsCollector:
-    """Accumulates metrics during a run and produces output."""
-
-    def __init__(self, run_id: str, document_id: str) -> None:
-        self.run_id = run_id
-        self.document_id = document_id
-        self.started_at = dt.datetime.now(dt.UTC)
-        self._metrics = RunMetrics(
-            run_id=run_id,
-            document_id=document_id,
-            status="running",
-            started_at=self.started_at,
-        )
-
-    def update_status(self, status: str) -> None:
-        """Set the final run status."""
-        self._metrics.status = status
-        self._metrics.finished_at = dt.datetime.now(dt.UTC)
-
-    def record_stage(
-        self,
-        stage: str,
-        status: str,
-        duration_ms: int,
-        **kwargs: Any,
-    ) -> None:
-        """Record metrics for a completed stage."""
-        stage_metrics = StageMetrics(
-            stage=stage,
-            status=status,
-            duration_ms=duration_ms,
-            **{k: v for k, v in kwargs.items() if k in StageMetrics.__dataclass_fields__},
-        )
-        self._metrics.stages.append(stage_metrics)
-
-    @property
-    def metrics(self) -> RunMetrics:
-        """Access the current metrics object."""
-        return self._metrics
-
-    def finalize(self) -> RunMetrics:
-        """Finalize metrics (compute totals, etc.)."""
-        # Sum up stage timings
-        self._metrics.total_runtime_ms = sum(s.duration_ms for s in self._metrics.stages)
-
-        # Rollup token usage
-        self._metrics.total_input_tokens = sum(s.input_tokens for s in self._metrics.stages)
-        self._metrics.total_completion_tokens = sum(
-            s.output_tokens for s in self._metrics.stages
-        )
-        self._metrics.total_cached_tokens = sum(s.cached_tokens for s in self._metrics.stages)
-        self._metrics.total_reasoning_tokens = sum(s.reasoning_tokens for s in self._metrics.stages)
-        self._metrics.total_llm_calls = sum(s.llm_calls for s in self._metrics.stages)
-        self._metrics.total_llm_latency_ms = sum(s.llm_latency_ms for s in self._metrics.stages)
-
-        # Rollup entities and claims
-        self._metrics.entities_extracted = sum(s.entity_count for s in self._metrics.stages)
-        self._metrics.claims_total = sum(s.claim_count for s in self._metrics.stages)
-        self._metrics.evidence_retrieved = sum(s.evidence_records for s in self._metrics.stages)
-
-        return self._metrics

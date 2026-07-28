@@ -46,8 +46,11 @@ from app.analysis.verification import (
 from app.analysis.verification import summarise as summarise_verification
 from app.core.config import settings
 from app.core.enums import (
+    ADVERSE_CORROBORATION,
+    CORROBORATED_STATUSES,
     STAGE_ORDER,
     STAGE_WEIGHTS,
+    UNCHECKED_CORROBORATION,
     ClaimCategory,
     ClaimType,
     EvidenceTier,
@@ -59,7 +62,7 @@ from app.core.enums import (
     VerificationStatus,
 )
 from app.core.errors import BioIntelError, PipelineError
-from app.core.instrumentation import RunMetrics
+from app.core.instrumentation import RunMetrics, StageMetrics
 from app.core.logging import bind_run_context, clear_run_context, get_logger
 from app.db.models import (
     AnalysisRun,
@@ -1925,9 +1928,7 @@ def _format_evidence_digest(context: RunContext, limit: int = 18) -> str:
     return "\n".join(row for _, row in rows[:limit])
 
 
-def _save_run_metrics(
-    run_id: str, context: RunContext, llm: LLMClient, status: str
-) -> None:
+def _save_run_metrics(run_id: str, context: RunContext, llm: LLMClient, status: str) -> None:
     """Save comprehensive metrics to JSON and Markdown files."""
     try:
         metrics = RunMetrics(
@@ -1941,66 +1942,70 @@ def _save_run_metrics(
             pages_with_content=context.pages_with_content,
             requires_ocr=context.requires_ocr,
             entities_extracted=len(context.entities.entities) if context.entities else 0,
+            entities_deduped=context.entities.duplicates_merged if context.entities else 0,
             claims_total=len(context.claim_ids),
             claims_verified=len(context.verifications),
             claims_scored=len(context.claim_scores),
             evidence_retrieved=len(context.evidence_ids),
             claims_corroborated=sum(
-                1 for c in context.corroborations.values() if c.corroborated
+                1 for c in context.corroborations.values() if c.status in CORROBORATED_STATUSES
             ),
             claims_contradicted=sum(
-                1 for c in context.corroborations.values() if c.contradicted
+                1 for c in context.corroborations.values() if c.status in ADVERSE_CORROBORATION
             ),
             claims_unverified=sum(
-                1 for c in context.corroborations.values() if c.unverified
+                1 for c in context.corroborations.values() if c.status in UNCHECKED_CORROBORATION
             ),
             verification_coverage=(
-                len(context.verifications) / len(context.claim_ids)
-                if context.claim_ids
-                else 0.0
+                len(context.verifications) / len(context.claim_ids) if context.claim_ids else 0.0
             ),
-            assessment_confidence=(
-                context.overall.confidence if context.overall else 0.0
-            ),
+            assessment_confidence=(context.overall.confidence if context.overall else 0.0),
             total_input_tokens=llm.metrics.usage.input_tokens,
             total_completion_tokens=llm.metrics.usage.output_tokens,
             total_cached_tokens=llm.metrics.usage.cached_input_tokens,
             total_reasoning_tokens=llm.metrics.usage.reasoning_tokens,
             total_llm_calls=llm.metrics.calls,
             total_llm_latency_ms=llm.metrics.latency_ms,
-            estimated_input_cost=sum(
-                s.cost_usd * 0.5 for s in llm.metrics.by_stage.values()
-            ),  # Rough estimate
-            estimated_completion_cost=sum(
-                s.cost_usd * 0.5 for s in llm.metrics.by_stage.values()
-            ),  # Rough estimate
-            total_estimated_cost=llm.metrics.cost_usd,
-            report_sections=len(context.report.sections) if context.report else 0,
-            report_length_chars=len(context.report.markdown) if context.report else 0,
-            references_count=len(context.references.items),
-            questions_count=(
-                len(context.risks_questions.questions)
-                if context.risks_questions
-                else 0
+            estimated_input_cost=round(
+                llm.metrics.cost.input_usd + llm.metrics.cost.cached_input_usd, 6
             ),
+            estimated_completion_cost=round(llm.metrics.cost.output_usd, 6),
+            estimated_reasoning_cost=round(llm.metrics.cost.reasoning_usd, 6),
+            total_estimated_cost=round(llm.metrics.cost_usd, 6),
+            report_sections=len(context.report.sections) if context.report else 0,
+            # The rendered length is recorded by the report stage; the built
+            # report holds structured sections, not the rendered document.
+            report_length_chars=int(
+                context.stage_metrics.get(PipelineStage.REPORT.value, {}).get("markdown_chars", 0)
+            ),
+            references_count=len(context.report.citations) if context.report else 0,
+            questions_count=(
+                len(context.risks_questions.questions) if context.risks_questions else 0
+            ),
+            unique_sources=len(
+                {
+                    scored.record.source
+                    for result in context.retrieval_results
+                    for scored in result.records
+                }
+            ),
+            evidence_ranked=sum(len(result.records) for result in context.retrieval_results),
             degraded=context.degraded,
             warnings=context.warnings,
             llm_provider=llm.provider_name,
         )
 
-        # Record stage-level metrics
-        from app.core.instrumentation import StageMetrics as StageMetricsClass
-
         for timing in context.stage_timings:
-            stage_name = timing["stage"]
             stage_llm = timing.get("llm", {})
             metrics.stages.append(
-                StageMetricsClass(
-                    stage=stage_name,
+                StageMetrics(
+                    stage=timing["stage"],
                     status=timing["status"],
                     duration_ms=timing["duration_ms"],
                     input_tokens=stage_llm.get("input_tokens", 0),
                     output_tokens=stage_llm.get("output_tokens", 0),
+                    cached_tokens=stage_llm.get("cached_input_tokens", 0),
+                    reasoning_tokens=stage_llm.get("reasoning_tokens", 0),
                     llm_calls=stage_llm.get("calls", 0),
                     llm_latency_ms=stage_llm.get("latency_ms_total", 0),
                 )
@@ -2017,9 +2022,15 @@ def _save_run_metrics(
 
         log.info("instrumentation.metrics_saved", run_id=run_id, path=str(metrics_dir))
     except Exception as exc:
-        # Metrics saving is secondary; don't fail the run if it breaks
-        log.warning(
+        # Metrics are secondary to the analysis, so a failure here must not lose
+        # a completed run. It is still a defect: log at error with the traceback
+        # so it surfaces instead of decaying into a warning nobody reads. An
+        # earlier version of this function referenced fields that did not exist
+        # and failed silently on every run; the pipeline tests now assert the
+        # artefacts are written.
+        log.error(
             "instrumentation.save_failed",
             run_id=run_id,
             error=str(exc)[:300],
+            exc_info=True,
         )

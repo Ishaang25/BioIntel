@@ -39,7 +39,7 @@ from app.db.models import LLMCallLog
 from app.db.session import session_scope
 from app.llm.base import ImagePart, LLMProvider, LLMRequest, LLMResponse, Usage
 from app.llm.json_repair import salvage_json
-from app.llm.pricing import estimate_cost_usd
+from app.llm.pricing import CostBreakdown, cost_breakdown
 from app.llm.stub_provider import StubProvider
 from app.utils.text import token_estimate
 
@@ -68,6 +68,8 @@ class StageUsage:
     input_tokens: int = 0
     max_input_tokens: int = 0
     output_tokens: int = 0
+    cached_input_tokens: int = 0
+    reasoning_tokens: int = 0
     cost_usd: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
@@ -83,6 +85,8 @@ class StageUsage:
             "input_tokens": self.input_tokens,
             "input_tokens_max": self.max_input_tokens,
             "output_tokens": self.output_tokens,
+            "cached_input_tokens": self.cached_input_tokens,
+            "reasoning_tokens": self.reasoning_tokens,
             "estimated_cost_usd": round(self.cost_usd, 6),
         }
 
@@ -102,6 +106,10 @@ class LLMMetrics:
     over_input_budget: int = 0
     usage: Usage = field(default_factory=Usage)
     cost_usd: float = 0.0
+    #: Same spend as ``cost_usd``, split into the components the provider
+    #: bills separately. Accumulated per call so the split reflects the real
+    #: per-model prices rather than being apportioned from the total.
+    cost: CostBreakdown = field(default_factory=CostBreakdown)
     latency_ms: int = 0
     max_input_tokens_seen: int = 0
     by_purpose: dict[str, int] = field(default_factory=dict)
@@ -126,6 +134,12 @@ class LLMMetrics:
             "max_input_tokens_seen": self.max_input_tokens_seen,
             "latency_ms_total": self.latency_ms,
             "estimated_cost_usd": round(self.cost_usd, 6),
+            "estimated_cost_breakdown_usd": {
+                "input": round(self.cost.input_usd, 6),
+                "cached_input": round(self.cost.cached_input_usd, 6),
+                "output": round(self.cost.output_usd, 6),
+                "reasoning": round(self.cost.reasoning_usd, 6),
+            },
             "by_purpose": dict(self.by_purpose),
             "by_stage": {name: usage.to_dict() for name, usage in self.by_stage.items()},
         }
@@ -389,12 +403,14 @@ class LLMClient:
                 raise
             raise LLMError(f"Model call '{request.purpose}' failed: {exc}", cause=exc) from exc
 
-        cost = estimate_cost_usd(response.model, response.usage)
+        breakdown = cost_breakdown(response.model, response.usage)
+        cost = round(breakdown.total_usd, 6)
         retries = max(0, response.attempts - 1)
         async with self._lock:
             self.metrics.calls += 1
             self.metrics.usage = self.metrics.usage + response.usage
             self.metrics.cost_usd += cost
+            self.metrics.cost = self.metrics.cost + breakdown
             self.metrics.latency_ms += response.latency_ms
             self.metrics.provider_retries += retries
             self.metrics.max_input_tokens_seen = max(
@@ -413,6 +429,8 @@ class LLMClient:
             usage.input_tokens += response.usage.input_tokens
             usage.max_input_tokens = max(usage.max_input_tokens, response.usage.input_tokens)
             usage.output_tokens += response.usage.output_tokens
+            usage.cached_input_tokens += response.usage.cached_input_tokens
+            usage.reasoning_tokens += response.usage.reasoning_tokens
             usage.cost_usd += cost
             if response.truncated:
                 usage.truncated += 1

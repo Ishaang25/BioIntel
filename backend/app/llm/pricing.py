@@ -72,14 +72,51 @@ def price_for(model: str) -> ModelPrice | None:
     return prices[max(candidates, key=len)]
 
 
-def estimate_cost_usd(model: str, usage: Usage) -> float:
+@dataclass(frozen=True, slots=True)
+class CostBreakdown:
+    """Estimated spend for one model's usage, split by what was billed."""
+
+    #: Uncached prompt tokens.
+    input_usd: float = 0.0
+    #: Prompt tokens served from the provider's cache, billed at a discount.
+    cached_input_usd: float = 0.0
+    #: Completion tokens. Reasoning tokens are billed at the completion rate
+    #: and are already counted inside ``Usage.output_tokens`` by the provider,
+    #: so they are reported separately for visibility, not added again.
+    output_usd: float = 0.0
+    reasoning_usd: float = 0.0
+
+    @property
+    def total_usd(self) -> float:
+        return self.input_usd + self.cached_input_usd + self.output_usd
+
+    def __add__(self, other: CostBreakdown) -> CostBreakdown:
+        return CostBreakdown(
+            input_usd=self.input_usd + other.input_usd,
+            cached_input_usd=self.cached_input_usd + other.cached_input_usd,
+            output_usd=self.output_usd + other.output_usd,
+            reasoning_usd=self.reasoning_usd + other.reasoning_usd,
+        )
+
+
+def cost_breakdown(model: str, usage: Usage) -> CostBreakdown:
+    """Split estimated spend into its billed components.
+
+    ``estimate_cost_usd`` returns only the total; the breakdown is what the
+    run summary reports, so it is derived from the same prices rather than
+    apportioned after the fact.
+    """
     price = price_for(model)
     if price is None:
-        return 0.0
+        return CostBreakdown()
     fresh_input = max(0, usage.input_tokens - usage.cached_input_tokens)
-    total = (
-        fresh_input * price.input
-        + usage.cached_input_tokens * price.cached_input
-        + usage.output_tokens * price.output
-    ) / 1_000_000
-    return round(total, 6)
+    return CostBreakdown(
+        input_usd=fresh_input * price.input / 1_000_000,
+        cached_input_usd=usage.cached_input_tokens * price.cached_input / 1_000_000,
+        output_usd=usage.output_tokens * price.output / 1_000_000,
+        reasoning_usd=usage.reasoning_tokens * price.output / 1_000_000,
+    )
+
+
+def estimate_cost_usd(model: str, usage: Usage) -> float:
+    return round(cost_breakdown(model, usage).total_usd, 6)

@@ -9,6 +9,8 @@ non-critical stage degrades rather than aborts.
 
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 
@@ -286,6 +288,36 @@ class TestFullRun:
         assert run.config["prompt_version"]
         assert run.config["pipeline_version"]
         assert run.config["models"]["reasoning"]
+
+    async def test_run_writes_its_metrics_artefacts(self, completed_run, settings):
+        """Every run drops run_metrics.json and run_summary.md with no extra step."""
+        run_dir = settings.metrics_dir / completed_run
+
+        metrics = json.loads((run_dir / "run_metrics.json").read_text(encoding="utf-8"))
+        summary = (run_dir / "run_summary.md").read_text(encoding="utf-8")
+
+        assert metrics["run_id"] == completed_run
+        assert metrics["status"] == "succeeded"
+        assert metrics["total_runtime_ms"] > 0
+        assert metrics["claims_total"] > 0
+        assert metrics["report_length_chars"] > 0
+        # Every stage that ran is in the profile, so the summary can attribute
+        # runtime without anyone re-running the pipeline under a profiler.
+        assert {s["stage"] for s in metrics["stages"]} == {s.value for s in PipelineStage}
+        assert "# BioIntel Analysis Summary" in summary
+        assert "## Execution Profile" in summary
+
+    async def test_reported_cost_split_matches_the_total(self, completed_run, settings):
+        """The input/completion split is derived from prices, not apportioned."""
+        metrics = json.loads(
+            (settings.metrics_dir / completed_run / "run_metrics.json").read_text(encoding="utf-8")
+        )
+
+        assert metrics["estimated_input_cost"] + metrics["estimated_completion_cost"] == (
+            pytest.approx(metrics["total_estimated_cost"], abs=1e-6)
+        )
+        # Reasoning is billed at the completion rate and already counted in it.
+        assert metrics["estimated_reasoning_cost"] <= metrics["estimated_completion_cost"] + 1e-9
 
 
 class TestFailureBehaviour:

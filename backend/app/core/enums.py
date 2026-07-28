@@ -228,6 +228,15 @@ UNCHECKED_CORROBORATION = frozenset(
     }
 )
 
+#: Statuses where independent evidence affirmatively backs the claim, whole or
+#: in part. Used for reporting coverage; scoring uses the finer-grained status.
+CORROBORATED_STATUSES = frozenset(
+    {
+        CorroborationStatus.CORROBORATED,
+        CorroborationStatus.PARTIALLY_CORROBORATED,
+    }
+)
+
 
 class ConfidenceLevel(StrEnum):
     HIGH = "high"
