@@ -57,6 +57,20 @@ def create_run(
             .scalars()
             .first()
         )
+        # "Already in progress" must mean something is actually in progress.
+        # A run whose worker died stays `running` for ever, and refusing on
+        # the status alone locks the document out of the product permanently
+        # -- restart-proof, because the row is what is wrong. Check that the
+        # run is genuinely alive, and reclaim it if it is not.
+        if active is not None and _is_abandoned(session, active):
+            _abandon(session, active)
+            log.warning(
+                "run.reclaimed_abandoned",
+                run_id=active.id,
+                document_id=document_id,
+                previous_status=str(active.status),
+            )
+            active = None
         if active is not None:
             raise Conflict(
                 "An analysis of this document is already in progress.",
@@ -85,6 +99,64 @@ def create_run(
         mode=settings.job_execution_mode,
     )
     return session.get(AnalysisRun, run_id)  # type: ignore[return-value]
+
+
+def _is_abandoned(session: Session, run: AnalysisRun) -> bool:
+    """True when nothing alive can advance this run.
+
+    Liveness is decided by the job, not by the run's own status: the run row
+    is written *by* the thing that died, so it cannot be trusted to report
+    its own death.
+    """
+    from app.core.enums import JobStatus
+    from app.db.models import Job
+
+    if settings.job_execution_mode == "inline":
+        future = _INLINE_FUTURES.get(run.id)
+        return future is None or future.done()
+
+    jobs = list(session.execute(select(Job).where(Job.run_id == run.id)).scalars())
+    if not jobs:
+        # No job was ever created for a run the queue was supposed to own.
+        return True
+    live = [j for j in jobs if j.status in (JobStatus.QUEUED, JobStatus.RUNNING)]
+    if not live:
+        return True
+
+    # A queued job will be picked up; only a `running` one can be a corpse.
+    cutoff = dt.datetime.now(dt.UTC) - dt.timedelta(seconds=settings.job_stale_after_seconds)
+    for job in live:
+        if job.status is JobStatus.QUEUED:
+            return False
+        marker = job.heartbeat_at or job.locked_at
+        if marker is None or _aware(marker) > cutoff:
+            return False
+    return True
+
+
+def _abandon(session: Session, run: AnalysisRun) -> None:
+    """Close out a dead run and its jobs so the document is usable again."""
+    from app.core.enums import JobStatus
+    from app.db.models import Job
+
+    run.status = RunStatus.FAILED
+    run.finished_at = dt.datetime.now(dt.UTC)
+    run.error_code = run.error_code or "abandoned"
+    run.error_message = run.error_message or (
+        "This analysis stopped without completing, most likely because the worker was "
+        "interrupted. It was closed automatically so a new analysis could start."
+    )
+    for job in session.execute(select(Job).where(Job.run_id == run.id)).scalars():
+        if job.status in (JobStatus.QUEUED, JobStatus.RUNNING):
+            job.status = JobStatus.FAILED
+            job.locked_by = None
+            job.last_error = "Superseded: the run was reclaimed after its worker was lost."
+    session.flush()
+
+
+def _aware(value: dt.datetime) -> dt.datetime:
+    """SQLite hands back naive datetimes; compare them as UTC."""
+    return value if value.tzinfo is not None else value.replace(tzinfo=dt.UTC)
 
 
 #: Futures for analyses started in ``inline`` mode, so callers can await them.
@@ -150,10 +222,13 @@ def cancel_run(session: Session, run_id: str) -> AnalysisRun:
             detail={"status": run.status},
         )
     queue.request_cancel(run_id)
-    if run.status is RunStatus.PENDING:
+    # A live run stops at its next cancellation checkpoint. A run with no live
+    # worker would otherwise stay `running` for ever, so cancelling it has to
+    # actually cancel it -- that is the whole point of the button.
+    if run.status is RunStatus.PENDING or _is_abandoned(session, run):
         run.status = RunStatus.CANCELLED
         run.finished_at = dt.datetime.now(dt.UTC)
-    log.info("run.cancel_requested", run_id=run_id)
+    log.info("run.cancel_requested", run_id=run_id, status=str(run.status))
     return run
 
 

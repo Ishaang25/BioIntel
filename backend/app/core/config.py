@@ -74,7 +74,13 @@ class Settings(BaseSettings):
 
     llm_timeout_seconds: float = 180.0
     llm_max_retries: int = 4
-    llm_max_output_tokens: int = 16000
+    #: Absolute ceiling on one response, reasoning tokens included. Runaway
+    #: output is bounded by chunk size, not by this -- its job is to stop a
+    #: pathological call, so it must sit well clear of a legitimate answer
+    #: plus its reasoning. At 16,000 a claim chunk's content budget and a
+    #: reasoning model's reserve summed to exactly the cap, leaving no
+    #: headroom at all.
+    llm_max_output_tokens: int = 32000
     #: Reasoning effort for models that support it ("minimal" | "low" | "medium" | "high").
     llm_reasoning_effort: str = "medium"
     #: Effort for mechanical extraction over a handful of pages. Deliberately

@@ -680,18 +680,31 @@ def _report(context: dict[str, Any], request: LLMRequest) -> dict[str, Any]:
     score = float(context.get("overall_score", 0.0))
     section_plan: list[dict[str, str]] = context.get("section_plan", []) or []
 
-    summary = (
-        f"This memo assesses the scientific claims made by {company}. BioIntel extracted "
-        f"{claim_count} distinct claims from the deck and retrieved {evidence_count} external "
-        f"records from PubMed, Europe PMC and ClinicalTrials.gov. Of the extracted claims, "
-        f"{supported} were matched to at least one consistent record, {contradicted} were "
-        f"matched to at least one conflicting record, and {unsupported} had no external match. "
-        f"The composite scientific-credibility score is {score:.0f}/100. "
-        "IMPORTANT: this analysis was produced without a language-model provider configured, so "
-        "claim interpretation and evidence adjudication were performed by deterministic lexical "
-        "rules rather than scientific reasoning. Treat it as a structured index of the deck and "
-        "its literature neighbourhood, not as a substitute for expert review."
-    )
+    summary = {
+        "investment_thesis": (
+            f"{company} presents {claim_count} extractable scientific claims. This summary was "
+            "assembled offline by deterministic rules, so it indexes the deck rather than "
+            "interpreting it."
+        ),
+        "key_strengths": [
+            f"{supported} claim(s) matched at least one consistent external record.",
+            f"{evidence_count} external record(s) were retrieved and linked.",
+        ],
+        "key_risks": [
+            f"{contradicted} claim(s) matched at least one conflicting record.",
+            f"{unsupported} claim(s) had no external match; this is an information gap.",
+            STUB_NOTE,
+        ],
+        "recommendation_line": (
+            f"Composite scientific credibility is {score:.0f}/100; re-run with a language-model "
+            "provider before this informs a decision."
+        ),
+        "diligence_priorities": [
+            "Configure a language-model provider and re-run the analysis.",
+            "Request primary datasets for the claims with no external match.",
+            "Have a qualified scientific advisor review the extracted claim table.",
+        ],
+    }
 
     sections = [
         {

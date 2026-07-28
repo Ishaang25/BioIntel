@@ -38,6 +38,12 @@ class Worker:
             concurrency=self.concurrency,
             provider=settings.llm_provider,
         )
+        # Recover before claiming anything. A worker starting up is the most
+        # likely moment for abandoned work to exist -- it usually means the
+        # previous one died -- and waiting half a stale-timeout to notice
+        # leaves the affected documents locked for no reason.
+        await self._recover()
+
         reaper = asyncio.create_task(self._reap_loop())
         try:
             while not self._shutdown.is_set():
@@ -82,10 +88,15 @@ class Worker:
             await self._sleep(settings.job_stale_after_seconds / 2)
             if self._shutdown.is_set():
                 return
-            try:
-                await asyncio.to_thread(queue.reap_stale_jobs)
-            except Exception:  # pragma: no cover
-                log.warning("worker.reap_failed", exc_info=True)
+            await self._recover()
+
+    async def _recover(self) -> None:
+        """Re-queue abandoned jobs and unlock runs nothing can finish."""
+        try:
+            await asyncio.to_thread(queue.reap_stale_jobs)
+            await asyncio.to_thread(queue.recover_orphaned_runs)
+        except Exception:  # pragma: no cover
+            log.warning("worker.reap_failed", exc_info=True)
 
     async def _run_job(self, job: dict[str, Any]) -> None:
         job_id = job["id"]
@@ -106,6 +117,15 @@ class Worker:
         except CancelledError:
             await asyncio.to_thread(queue.mark_cancelled, job_id)
             log.info("job.cancelled", job_id=job_id, run_id=run_id)
+        except asyncio.CancelledError:
+            # The worker is going down mid-analysis. Hand the job back so the
+            # next worker starts it immediately instead of the document
+            # sitting locked until the stale-job timeout expires.
+            await asyncio.to_thread(
+                queue.release, job_id, "Worker shut down while this job was running."
+            )
+            log.info("job.released_on_shutdown", job_id=job_id, run_id=run_id)
+            raise
         except Exception as exc:
             requeued = await asyncio.to_thread(
                 queue.mark_failed, job_id, f"{type(exc).__name__}: {exc}"

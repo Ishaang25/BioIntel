@@ -613,13 +613,54 @@ class ReportSectionOut(StrictModel):
     )
 
 
+class ExecutiveSummaryOut(StrictModel):
+    """The one page an IC member reads if they read nothing else.
+
+    Structured rather than free prose because the prose version reliably came
+    back as a single 280-word paragraph of citation-dense sentences averaging
+    50 words -- technically complete and unreadable in a meeting.
+    """
+
+    investment_thesis: str = Field(
+        description=(
+            "2-3 sentences: what scientific proposition the investment rests on, in plain "
+            "language. An IC member who has not read the deck should understand the bet. "
+            "No citations in this field."
+        )
+    )
+    key_strengths: list[str] = Field(
+        description=(
+            "3-5 bullets, each one line. What is genuinely established, strongest first. "
+            "Cite [C#]/[E#] at the end of the bullet. Only include what the evidence "
+            "supports -- if little is established, say so in fewer bullets rather than "
+            "padding."
+        )
+    )
+    key_risks: list[str] = Field(
+        description=(
+            "3-5 bullets, each one line, most decision-relevant first. Distinguish a "
+            "contradicted claim from an unverified one in the wording. Cite [C#]/[E#]."
+        )
+    )
+    recommendation_line: str = Field(
+        description=(
+            "One sentence stating the recommendation and the single reason for it. Must "
+            "agree with the computed recommendation supplied; do not invent a different one."
+        )
+    )
+    diligence_priorities: list[str] = Field(
+        description=(
+            "Exactly 3 items: the highest-impact things to do next, each phrased as an "
+            "action with the document or dataset to request. Drawn from the ranked "
+            "questions supplied."
+        )
+    )
+
+
 class ReportOut(StrictModel):
     title: str = Field(description="Memo title including the company name where known.")
-    executive_summary: str = Field(
-        description=(
-            "6-10 sentences an investment committee can read standalone: what the company "
-            "claims, what the evidence shows, and the decisive open questions."
-        )
+    executive_summary: ExecutiveSummaryOut = Field(
+        description="The structured one-page IC summary."
     )
     sections: list[ReportSectionOut] = Field(
         description="The memo body. Follow the section plan given in the instructions exactly."
@@ -647,6 +688,7 @@ __all__ = [
     "DimensionCommentaryOut",
     "EntityExtractionOut",
     "EvidenceComparison",
+    "ExecutiveSummaryOut",
     "ExtractedClaim",
     "ExtractedEntity",
     "ExtractedTable",

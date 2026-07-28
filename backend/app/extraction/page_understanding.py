@@ -23,6 +23,7 @@ from app.core.enums import PageKind
 from app.core.logging import get_logger
 from app.llm import prompts
 from app.llm.base import ImagePart
+from app.llm.budgets import output_budget
 from app.llm.client import LLMClient
 from app.llm.schemas import PageUnderstandingOut
 from app.utils.text import truncate
@@ -191,10 +192,15 @@ class PageUnderstandingStage:
             schema=PageUnderstandingOut,
             model=settings.model_vision,
             images=images,
-            # One page, one budget. Without a cap a page the model finds
+            # One page, one budget -- transcription room plus the reserve the
+            # model needs to think. Without a cap a page the model finds
             # confusing consumes the global 16k output allowance and minutes
             # of wall clock, while the pages behind it wait for a slot.
-            max_output_tokens=settings.vision_max_output_tokens,
+            max_output_tokens=output_budget(
+                settings.model_vision,
+                content_tokens=settings.vision_max_output_tokens,
+                effort=settings.vision_reasoning_effort,
+            ),
             reasoning_effort=settings.vision_reasoning_effort,
             context={
                 "page_number": page.page_number,

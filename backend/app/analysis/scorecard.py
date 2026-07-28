@@ -23,14 +23,17 @@ from typing import Any
 
 from app.analysis.claim_policy import policy_for
 from app.analysis.corroboration import CorroborationAssessment
+from app.analysis.evidence_state import NO_INFORMATION_ANCHOR, informed_aggregate
 from app.analysis.scoring import ClaimScore, ClaimScoringInput, band_for
 from app.core.enums import (
     ADVERSE_CORROBORATION,
+    BIOMEDICAL_ARCHETYPES,
     ClaimType,
     CompanyArchetype,
     ConfidenceLevel,
     CorroborationStatus,
     CredibilityBand,
+    EvidenceState,
     EvidenceTier,
     ICRecommendation,
     ScoreDimension,
@@ -140,9 +143,29 @@ ARCHETYPE_WEIGHTS[CompanyArchetype.TOOLS_AND_SERVICES] = ARCHETYPE_WEIGHTS[
 ARCHETYPE_WEIGHTS[CompanyArchetype.DIAGNOSTICS] = ARCHETYPE_WEIGHTS[
     CompanyArchetype.CLINICAL_STAGE_ASSET
 ]
+ARCHETYPE_WEIGHTS[CompanyArchetype.MEDICAL_DEVICE] = ARCHETYPE_WEIGHTS[
+    CompanyArchetype.CLINICAL_STAGE_ASSET
+]
 ARCHETYPE_WEIGHTS[CompanyArchetype.UNKNOWN] = ARCHETYPE_WEIGHTS[
     CompanyArchetype.CLINICAL_STAGE_ASSET
 ]
+
+#: For a company outside life sciences only the archetype-neutral axes carry
+#: any meaning: what the company disclosed, how concentrated it is, and
+#: whether it has executed. The biomedical axes are reported as inapplicable.
+_COMMERCIAL_WEIGHTS: dict[ScoreDimension, float] = {
+    ScoreDimension.EXECUTION_CREDIBILITY: 1.3,
+    ScoreDimension.COMMERCIAL_READINESS: 1.3,
+    ScoreDimension.DISCLOSURE_QUALITY: 1.1,
+    ScoreDimension.PIPELINE_DIVERSIFICATION: 0.9,
+    ScoreDimension.EVIDENCE_QUALITY: 0.7,
+}
+for _archetype in (
+    CompanyArchetype.NON_BIOMEDICAL,
+    CompanyArchetype.HEALTHCARE_SOFTWARE,
+    CompanyArchetype.HEALTHCARE_SERVICES,
+):
+    ARCHETYPE_WEIGHTS[_archetype] = _COMMERCIAL_WEIGHTS
 
 
 @dataclass(slots=True)
@@ -160,6 +183,14 @@ class DimensionScore:
     #: Findings that pushed it down.
     negative_drivers: list[dict[str, str]] = field(default_factory=list)
     claims_considered: int = 0
+    #: Share of this dimension's claim weight that carried real information,
+    #: 0-1. Low means "we could not establish this", which belongs in
+    #: confidence -- not in the score.
+    information_ratio: float = 0.0
+    #: Claims resting on company-held data. These need an audit, not scepticism.
+    claims_requiring_audit: int = 0
+    #: False when the biomedical framework does not apply to this company.
+    applicable: bool = True
 
     @property
     def assessed(self) -> bool:
@@ -221,6 +252,9 @@ class Scorecard:
                     "negative_drivers": d.negative_drivers,
                     "claims_considered": d.claims_considered,
                     "assessed": d.assessed,
+                    "applicable": d.applicable,
+                    "information_ratio": d.information_ratio,
+                    "claims_requiring_audit": d.claims_requiring_audit,
                 }
                 for d in self.dimensions
             ],
@@ -239,6 +273,56 @@ class ScorecardInput:
     corroboration: CorroborationAssessment | None
 
 
+#: Dimensions that only mean something for a company developing a medical
+#: product. Applied to anything else they manufacture findings: a satellite
+#: communications deck was scored 36.7 for "scientific validity" and 26.0 for
+#: "commercial readiness" as a *biotech*, numbers that measure nothing and
+#: read as a damning assessment.
+BIOMEDICAL_ONLY_DIMENSIONS = frozenset(
+    {
+        ScoreDimension.SCIENTIFIC_VALIDITY,
+        ScoreDimension.CLINICAL_MATURITY,
+        ScoreDimension.REGULATORY_CONFIDENCE,
+        ScoreDimension.TRANSLATIONAL_RISK,
+        ScoreDimension.PLATFORM_STRENGTH,
+    }
+)
+
+#: Claim types that only a life-sciences company makes. Their presence is the
+#: positive signal that the biomedical framework applies at all.
+_BIOMEDICAL_CLAIM_TYPES = frozenset(
+    {
+        ClaimType.CLINICAL_RESULT,
+        ClaimType.PRECLINICAL_RESULT,
+        ClaimType.PIPELINE_STAGE,
+        ClaimType.REGULATORY_APPROVAL,
+        ClaimType.REGULATORY_SUBMISSION,
+        ClaimType.MECHANISM,
+        ClaimType.BIOMARKER,
+        ClaimType.SAFETY,
+    }
+)
+
+#: Below this share of biomedical claims, the deck is not describing the
+#: development of a medical product and must not be scored as though it were.
+BIOMEDICAL_CLAIM_THRESHOLD = 0.12
+
+
+def is_biomedical(inputs: list[ScorecardInput]) -> bool:
+    """Whether the biomedical scoring framework applies to this company.
+
+    Asks for positive evidence that the deck is about developing a medical
+    product, rather than assuming it and scoring accordingly. A deck with no
+    clinical, preclinical, regulatory, mechanistic or safety claims is not a
+    biotech deck, however many numbers it contains.
+    """
+    scorable = [i for i in inputs if i.score.scored]
+    if not scorable:
+        return False
+    biomedical = sum(1 for i in scorable if i.scoring.claim_type in _BIOMEDICAL_CLAIM_TYPES)
+    return (biomedical / len(scorable)) >= BIOMEDICAL_CLAIM_THRESHOLD
+
+
 def detect_archetype(
     inputs: list[ScorecardInput],
     *,
@@ -251,7 +335,14 @@ def detect_archetype(
     makes multiple platform-level assertions across a multi-programme
     pipeline, because assessing a single-asset company as a platform would
     understate its concentration risk.
+
+    The first question is whether this is a life-sciences company at all.
+    Answering it late -- or not at all -- is what let a satellite
+    communications deck be scored on translational readiness.
     """
+    if inputs and not is_biomedical(inputs):
+        return CompanyArchetype.NON_BIOMEDICAL
+
     platform_claims = sum(
         1 for i in inputs if i.scoring.claim_type is ClaimType.PLATFORM_CAPABILITY
     )
@@ -306,12 +397,18 @@ def build_scorecard(
         inputs, development_stage=development_stage, pipeline_size=pipeline_size
     )
 
-    dimensions = [
-        _score_dimension(
-            dimension, inputs, resolved_archetype, pipeline_size, marketing_claim_ratio
+    biomedical = resolved_archetype in BIOMEDICAL_ARCHETYPES
+
+    dimensions = []
+    for dimension in ScoreDimension:
+        if not biomedical and dimension in BIOMEDICAL_ONLY_DIMENSIONS:
+            dimensions.append(_not_applicable(dimension, resolved_archetype))
+            continue
+        dimensions.append(
+            _score_dimension(
+                dimension, inputs, resolved_archetype, pipeline_size, marketing_claim_ratio
+            )
         )
-        for dimension in ScoreDimension
-    ]
 
     weights = ARCHETYPE_WEIGHTS.get(resolved_archetype, ARCHETYPE_WEIGHTS[CompanyArchetype.UNKNOWN])
     assessed = [d for d in dimensions if d.assessed]
@@ -326,7 +423,9 @@ def build_scorecard(
 
     confidence *= 0.7 + 0.3 * page_coverage
 
-    recommendation, rationale = _recommend(overall, dimensions, inputs, confidence)
+    recommendation, rationale = _recommend(
+        overall, dimensions, inputs, confidence, resolved_archetype
+    )
 
     return Scorecard(
         dimensions=dimensions,
@@ -345,12 +444,60 @@ def build_scorecard(
             "claims_scored": sum(1 for i in inputs if i.score.scored),
             "claims_excluded": sum(1 for i in inputs if not i.score.scored),
             "page_coverage": round(page_coverage, 4),
+            "biomedical_framework_applied": biomedical,
+            "dimensions_not_applicable": [
+                d.dimension.value for d in dimensions if not d.applicable
+            ],
+            # Reported alongside the score, never folded into it: how much of
+            # the company's account we managed to check is a different fact
+            # from how good that account is.
+            "verification_coverage": _verification_coverage([i for i in inputs if i.score.scored]),
+            "evidence_states": _state_distribution(inputs),
+            "claims_requiring_audit": sum(1 for i in inputs if i.score.requires_audit),
             "methodology": (
                 "Each dimension aggregates the claims that inform it, weighted by claim "
-                "importance and evidence grade. Dimensions with no informing claims are "
-                "reported as not assessed rather than scored zero."
+                "importance and by how much each claim's evidence licenses a conclusion. "
+                "Unverified claims carry low weight and pull a dimension toward neutral "
+                "rather than downward; the resulting shortfall is reported as reduced "
+                "confidence, not as a lower score. Dimensions with no informing claims are "
+                "reported as not assessed; dimensions that do not apply to the company's "
+                "archetype are reported as not applicable."
             ),
         },
+    )
+
+
+def _state_distribution(inputs: list[ScorecardInput]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in inputs:
+        key = item.score.evidence_state.value
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def _not_applicable(dimension: ScoreDimension, archetype: CompanyArchetype) -> DimensionScore:
+    """A biomedical axis on a company the framework does not fit.
+
+    Reported as inapplicable rather than unassessed or zero. The distinction
+    matters to a reader: "we could not measure this" invites diligence,
+    "this question does not apply to this company" invites a different
+    framework entirely.
+    """
+    label, question = DIMENSION_META[dimension]
+    return DimensionScore(
+        dimension=dimension,
+        label=label,
+        question=question,
+        score=None,
+        confidence=0.0,
+        applicable=False,
+        rationale=(
+            f"Not applicable: this document describes a "
+            f"{archetype.value.replace('_', ' ')} company, and {label.lower()} is a measure "
+            "of biomedical product development. Scoring it here would produce a number "
+            "that looks like a finding but measures nothing. Assess this company with a "
+            "commercial diligence framework instead."
+        ),
     )
 
 
@@ -393,9 +540,7 @@ def _score_dimension(
             ),
         )
 
-    weighted = sum(item.score.credibility_score * w for item, w in contributions)
-    total = sum(w for _, w in contributions)
-    score = weighted / total
+    score, information_ratio, confidence = _aggregate(contributions)
 
     if dimension is ScoreDimension.TRANSLATIONAL_RISK:
         score = _apply_translational_adjustment(score, contributions)
@@ -405,7 +550,7 @@ def _score_dimension(
         score = _apply_platform_coherence(score, inputs, archetype)
 
     positives, negatives = _drivers(contributions)
-    confidence = sum(item.score.confidence * w for item, w in contributions) / total
+    audit_items = [i for i, _ in contributions if i.score.requires_audit]
 
     return DimensionScore(
         dimension=dimension,
@@ -414,12 +559,64 @@ def _score_dimension(
         score=round(_clamp100(score), 2),
         confidence=round(confidence, 4),
         rationale=_dimension_rationale(
-            dimension, label, score, positives, negatives, len(contributions)
+            dimension,
+            label,
+            score,
+            positives,
+            negatives,
+            len(contributions),
+            information_ratio,
+            len(audit_items),
         ),
         positive_drivers=positives,
         negative_drivers=negatives,
         claims_considered=len(contributions),
+        information_ratio=round(information_ratio, 4),
+        claims_requiring_audit=len(audit_items),
     )
+
+
+def _aggregate(contributions: list[tuple[ScorecardInput, float]]) -> tuple[float, float, float]:
+    """Aggregate claims into one dimension score, propagating uncertainty.
+
+    The previous implementation took a plain weighted mean of credibility.
+    That silently converted every information gap into a finding: an unchecked
+    mechanism claim contributes its 35/100 prior, and a dimension built from
+    such claims reads "weak science" when the honest answer is "not
+    established either way". Because a claim informs several dimensions, the
+    same gap was then charged once per dimension.
+
+    Here each claim is weighted by how much it actually licenses a conclusion
+    (:data:`~app.analysis.evidence_state.INFORMATIVENESS`). Whatever weight is
+    missing is *not* redistributed as a penalty -- the score is pulled toward
+    :data:`NO_INFORMATION_ANCHOR`, the value that asserts nothing, and the
+    shortfall is reported as reduced confidence instead.
+
+    Returns ``(score, information_ratio, confidence)``.
+    """
+    total_weight = sum(w for _, w in contributions)
+    if total_weight <= 0:
+        return NO_INFORMATION_ANCHOR, 0.0, 0.0
+
+    score, information_ratio = informed_aggregate(
+        [
+            (
+                item.score.credibility_score,
+                weight,
+                bool(item.score.evidence and item.score.evidence.is_information_gap),
+            )
+            for item, weight in contributions
+        ]
+    )
+
+    # Confidence is the honest home for the missing information. A dimension
+    # built entirely from unverified claims scores near neutral with low
+    # confidence -- "we could not establish this" -- instead of scoring 40 and
+    # implying we established something bad.
+    claim_confidence = sum(i.score.confidence * w for i, w in contributions) / total_weight
+    confidence = _clamp01(0.35 * claim_confidence + 0.65 * information_ratio)
+
+    return score, information_ratio, confidence
 
 
 def _apply_translational_adjustment(
@@ -578,6 +775,9 @@ def _pipeline_dimension(
         positive_drivers=positives,
         negative_drivers=negatives,
         claims_considered=programmes,
+        # Structural: computed from what the deck disclosed, not from evidence
+        # retrieval, so there is no information gap to propagate here.
+        information_ratio=1.0,
     )
 
 
@@ -653,6 +853,8 @@ def _disclosure_dimension(
         positive_drivers=positives,
         negative_drivers=negatives,
         claims_considered=len(inputs),
+        # Structural: measured from the deck itself, not from retrieval.
+        information_ratio=1.0,
     )
 
 
@@ -669,22 +871,26 @@ def _drivers(
             "statement": item.statement[:180],
             "score": f"{item.score.credibility_score:.0f}",
             "status": item.score.corroboration.value,
+            "evidence_state": item.score.evidence_state.value,
         }
         if item.score.corroboration in ADVERSE_CORROBORATION:
             entry["reason"] = "Retrieved evidence disagrees with this claim."
             negatives.append(entry)
-        elif item.score.credibility_score >= 65:
+        elif item.score.credibility_score >= 65 and item.score.informativeness >= 0.5:
             entry["reason"] = (
                 item.corroboration.rationale[:200]
                 if item.corroboration
                 else "Well-supported claim."
             )
             positives.append(entry)
-        elif item.score.credibility_score < 40:
+        elif item.score.credibility_score < 40 and item.score.informativeness >= 0.5:
+            # Only a claim we actually *checked* may be listed as a negative
+            # driver. Listing an unverified claim here is how an information
+            # gap gets re-presented to the reader as an adverse finding.
             entry["reason"] = (
                 item.corroboration.rationale[:200]
                 if item.corroboration
-                else "Weakly supported claim."
+                else "Checked against external evidence and poorly supported."
             )
             negatives.append(entry)
 
@@ -698,6 +904,8 @@ def _dimension_rationale(
     positives: list[dict[str, str]],
     negatives: list[dict[str, str]],
     count: int,
+    information_ratio: float = 1.0,
+    audit_count: int = 0,
 ) -> str:
     band = band_for(_clamp100(score)).value
     lead = f"{label} scores {score:.0f}/100 ({band}) across {count} informing claim(s)."
@@ -709,11 +917,26 @@ def _dimension_rationale(
         )
 
     if negatives:
-        lead += f" It is held down by {len(negatives)} weak or contradicted claim(s)."
+        lead += f" It is held down by {len(negatives)} contradicted or weakly-evidenced claim(s)."
     if positives:
         lead += f" It is supported by {len(positives)} well-corroborated claim(s)."
     if not positives and not negatives:
         lead += " No claim was decisive in either direction."
+
+    # State the epistemic position explicitly. A reader must be able to tell a
+    # dimension we assessed as mediocre from one we could not assess.
+    if information_ratio < 0.35:
+        lead += (
+            f" Only {information_ratio:.0%} of the claim weight here carried externally "
+            "verifiable information, so this score is held near neutral and the "
+            "uncertainty is reflected in its confidence rather than in the number. "
+            "The constraint is what could be checked, not what was found."
+        )
+    if audit_count:
+        lead += (
+            f" {audit_count} claim(s) rest on company-held data and require audit rather "
+            "than scientific challenge."
+        )
     return lead
 
 
@@ -723,60 +946,153 @@ def _recommend(
     dimensions: list[DimensionScore],
     inputs: list[ScorecardInput],
     confidence: float,
+    archetype: CompanyArchetype = CompanyArchetype.UNKNOWN,
 ) -> tuple[ICRecommendation, str]:
-    contradicted = [
-        i for i in inputs if i.score.scored and i.score.corroboration in ADVERSE_CORROBORATION
-    ]
-    contradicted_critical = [i for i in contradicted if i.scoring.is_thesis_critical]
-    assessed = [d for d in dimensions if d.assessed]
-    weak_dimensions = [d for d in assessed if (d.score or 0) < 40]
+    """Decide what to do next from the science, our certainty, and coverage.
 
-    # A contradicted thesis-critical claim dominates the recommendation
-    # regardless of how well everything else scores.
-    if contradicted_critical:
+    Not from the score alone. Keying off one number conflates two situations
+    an investment committee treats completely differently:
+
+        strong biology, little external verification  -> advance, with conditions
+        strong verification, weak or adverse biology  -> significant concerns
+
+    Both can produce the same middling number. Routing on the score alone sent
+    the first to "significant concerns", which is the opposite of the correct
+    advice: the response to an information gap is diligence, not rejection.
+    """
+    scored = [i for i in inputs if i.score.scored]
+    contradicted = [i for i in scored if i.score.corroboration in ADVERSE_CORROBORATION]
+    contradicted_critical = [i for i in contradicted if i.scoring.is_thesis_critical]
+    implausible = [i for i in scored if i.score.evidence_state is EvidenceState.IMPLAUSIBLE]
+
+    assessed = [d for d in dimensions if d.assessed]
+    # A dimension is only "weak" if we actually established it is weak.
+    weak_dimensions = [d for d in assessed if (d.score or 0) < 40 and d.information_ratio >= 0.35]
+    verification_coverage = _verification_coverage(scored)
+    audit_items = [i for i in scored if i.score.requires_audit]
+
+    if not assessed:
         return (
-            ICRecommendation.SIGNIFICANT_CONCERNS,
+            ICRecommendation.FURTHER_DILIGENCE_REQUIRED,
             (
-                f"{len(contradicted_critical)} thesis-critical claim(s) are contradicted by "
-                "retrieved evidence. Resolve these before any further work: a thesis-critical "
-                "claim that the public record disagrees with is the single most consequential "
-                "finding this analysis can produce."
+                "No dimension could be assessed from this document. "
+                + (
+                    "The biomedical diligence framework does not apply to this company; "
+                    "route it to commercial diligence."
+                    if archetype not in BIOMEDICAL_ARCHETYPES
+                    else "Obtain a document containing the company's scientific claims."
+                )
             ),
         )
 
-    if overall >= 72 and confidence >= 0.55 and not weak_dimensions:
+    # --- genuine adverse findings dominate, and only these ----------------
+    if implausible:
+        return (
+            ICRecommendation.DO_NOT_ADVANCE,
+            (
+                f"{len(implausible)} claim(s) are inconsistent with established biology. "
+                "This is a scientific objection, not an evidence gap, and it should be "
+                "resolved with the company's scientific founders before any further work."
+            ),
+        )
+
+    if contradicted_critical:
+        # Proportionate, not absolute. A contradicted thesis-critical claim is
+        # the most consequential finding this analysis produces, but "how much
+        # of the thesis does it take down" is a different question from "does
+        # it exist". One overstated development stage in a company with
+        # approved products is a condition to clear, not a reason to stop; the
+        # same finding in a company with nothing else verified is decisive.
+        critical_total = max(1, sum(1 for i in scored if i.scoring.is_thesis_critical))
+        share = len(contradicted_critical) / critical_total
+        decisive = len(contradicted_critical) >= 2 or share > 0.34 or overall < 58
+
+        if decisive:
+            return (
+                ICRecommendation.SIGNIFICANT_CONCERNS,
+                (
+                    f"{len(contradicted_critical)} of {critical_total} thesis-critical claim(s) "
+                    "are contradicted by retrieved evidence. Resolve these before any further "
+                    "work: a thesis-critical claim that the public record disagrees with is the "
+                    "single most consequential finding this analysis can produce."
+                ),
+            )
+        return (
+            ICRecommendation.ADVANCE_WITH_CONDITIONS,
+            (
+                f"The scientific case is otherwise sound ({overall:.0f}/100), but "
+                f"{len(contradicted_critical)} thesis-critical claim(s) are contradicted by the "
+                "public record. This is a specific, checkable discrepancy rather than a broad "
+                "evidence problem: make its resolution a gating condition, and confirm the "
+                "company's position in writing before proceeding."
+            ),
+        )
+
+    if archetype not in BIOMEDICAL_ARCHETYPES:
+        return (
+            ICRecommendation.FURTHER_DILIGENCE_REQUIRED,
+            (
+                f"This is a {archetype.value.replace('_', ' ')} company. The biomedical "
+                "dimensions of this scorecard do not apply and were not scored; what remains "
+                f"({overall:.0f}/100) measures disclosure and execution only. Assess this "
+                "opportunity with a commercial diligence framework."
+            ),
+        )
+
+    # --- the science is good; the question is how sure we are -------------
+    strong_science = overall >= 70
+    sound_science = overall >= 58
+
+    if (
+        strong_science
+        and verification_coverage >= 0.4
+        and confidence >= 0.6
+        and not weak_dimensions
+    ):
         return (
             ICRecommendation.ADVANCE,
             (
-                f"The scientific case is well-evidenced across the assessed dimensions "
-                f"({overall:.0f}/100) with no dimension below 40 and no contradicted claims. "
-                "Proceed to commercial and financial diligence."
+                f"The scientific case is both strong ({overall:.0f}/100) and independently "
+                f"verified: {verification_coverage:.0%} of scored claims were corroborated "
+                "against external sources, with no contradicted claims and no dimension "
+                "established as weak. Proceed to commercial and financial diligence."
             ),
         )
 
-    if overall >= 58:
+    if strong_science:
+        # Strong biology, thin verification. This is the case the old logic
+        # got backwards.
+        return (
+            ICRecommendation.ADVANCE_WITH_CONDITIONS,
+            (
+                f"The science is strong ({overall:.0f}/100) but only "
+                f"{verification_coverage:.0%} of claims could be independently verified, so "
+                "assessment confidence is "
+                f"{confidence_level(confidence).value}. The constraint is what we could check, "
+                "not what we found: nothing retrieved contradicts the company's account. "
+                "Advance conditional on the diligence items below"
+                + (
+                    f", including audit of {len(audit_items)} company-reported metric(s)."
+                    if audit_items
+                    else "."
+                )
+            ),
+        )
+
+    if sound_science:
         weak_names = ", ".join(d.label.lower() for d in weak_dimensions[:3])
         return (
             ICRecommendation.ADVANCE_WITH_CONDITIONS,
             (
-                f"The scientific case holds at {overall:.0f}/100, but "
+                f"The scientific case holds at {overall:.0f}/100 with "
+                f"{verification_coverage:.0%} of claims independently verified, but "
                 + (
-                    f"{weak_names} require(s) resolution before committing. "
+                    f"{weak_names} was/were assessed as weak on the evidence available and "
+                    "require(s) resolution before committing. "
                     if weak_names
-                    else "assessment confidence is moderate. "
+                    else f"assessment confidence is {confidence_level(confidence).value}. "
                 )
                 + "Advance conditional on the diligence items below."
-            ),
-        )
-
-    if overall >= 40:
-        return (
-            ICRecommendation.FURTHER_DILIGENCE_REQUIRED,
-            (
-                f"At {overall:.0f}/100 the analysis is inconclusive rather than negative. "
-                f"{sum(1 for i in inputs if i.score.scored and i.score.corroboration in (CorroborationStatus.INSUFFICIENT_EVIDENCE, CorroborationStatus.NOT_INDEPENDENTLY_VERIFIED))} "
-                "claim(s) could not be checked against public sources, so the primary "
-                "constraint is information, not evidence against the company."
             ),
         )
 
@@ -784,20 +1100,44 @@ def _recommend(
         return (
             ICRecommendation.SIGNIFICANT_CONCERNS,
             (
-                f"Overall score {overall:.0f}/100 with {len(contradicted)} contradicted claim(s). "
-                "The evidence base does not currently support the scientific narrative."
+                f"Overall {overall:.0f}/100 with {len(contradicted)} claim(s) contradicted by "
+                "retrieved evidence. Unlike an information gap, this is evidence against the "
+                "company's account and does not resolve with more diligence."
             ),
         )
 
     return (
         ICRecommendation.FURTHER_DILIGENCE_REQUIRED,
         (
-            f"Overall score {overall:.0f}/100. The dominant issue is thin evidence rather than "
-            "adverse evidence; treat this as an information problem and obtain primary data "
-            "before drawing a conclusion."
+            f"At {overall:.0f}/100 the analysis is inconclusive rather than negative: "
+            f"{verification_coverage:.0%} of scored claims were externally verified and none "
+            "were contradicted. The dominant constraint is information, not adverse evidence. "
+            "Obtain primary data before drawing a conclusion"
+            + (
+                f", starting with audit of {len(audit_items)} company-reported metric(s)."
+                if audit_items
+                else "."
+            )
         ),
     )
 
 
+def _verification_coverage(scored: list[ScorecardInput]) -> float:
+    """Share of scored claims that external evidence actually spoke to.
+
+    Reported separately from the score throughout, because it answers a
+    different question: not "is the science good" but "how much of it did we
+    manage to check".
+    """
+    if not scored:
+        return 0.0
+    verified = sum(1 for i in scored if i.score.evidence and i.score.evidence.is_verified)
+    return round(verified / len(scored), 4)
+
+
 def _clamp100(value: float) -> float:
     return max(0.0, min(100.0, value))
+
+
+def _clamp01(value: float) -> float:
+    return max(0.0, min(1.0, value))

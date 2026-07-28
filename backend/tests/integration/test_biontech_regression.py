@@ -240,28 +240,38 @@ class TestChunksRunInParallel:
         must cost roughly L.
         """
         pages = composite_pages()
-
-        # Baseline: the stage's own deterministic work (gazetteer backstop,
-        # salience scoring) with instant model responses. Measuring against it
-        # keeps the assertion about concurrency rather than about how fast the
-        # machine running the test happens to be.
-        baseline_llm = LLMClient(LatencyOnlyProvider(0.0), persist_logs=False)
-        started = time.perf_counter()
-        baseline_result = await EntityExtractionStage(baseline_llm).run(pages)
-        baseline = time.perf_counter() - started
-
         delay = 0.3
-        llm = LLMClient(LatencyOnlyProvider(delay), persist_logs=False)
-        started = time.perf_counter()
-        result = await EntityExtractionStage(llm).run(pages)
-        elapsed = time.perf_counter() - started
 
-        assert result.chunks > 1
-        assert result.chunks == baseline_result.chunks
+        async def measure(latency: float) -> tuple[float, int]:
+            llm = LLMClient(LatencyOnlyProvider(latency), persist_logs=False)
+            started = time.perf_counter()
+            result = await EntityExtractionStage(llm).run(pages)
+            return time.perf_counter() - started, result.chunks
+
+        # Best of two passes each. The stage does real deterministic work of
+        # its own (gazetteer backstop, salience scoring), so the model wait is
+        # the difference between the two measurements -- and on a loaded CI
+        # machine a single sample of either can be inflated by the scheduler,
+        # which would fail this test for a reason that has nothing to do with
+        # concurrency. Taking the best sample measures the code, not the load.
+        baselines: list[float] = []
+        for _ in range(2):
+            duration, _chunks = await measure(0.0)
+            baselines.append(duration)
+        baseline = min(baselines)
+
+        timings: list[float] = []
+        chunks = 0
+        for _ in range(2):
+            duration, chunks = await measure(delay)
+            timings.append(duration)
+        elapsed = min(timings)
+
+        assert chunks > 1
         model_time = elapsed - baseline
-        sequential = delay * result.chunks
+        sequential = delay * chunks
         assert model_time < sequential * 0.5, (
-            f"{result.chunks} chunks spent {model_time:.2f}s waiting on the model; "
+            f"{chunks} chunks spent {model_time:.2f}s waiting on the model; "
             f"sequential would be {sequential:.2f}s"
         )
 
@@ -300,6 +310,22 @@ class TestOnlyTheFailedChunkIsRetried:
         assert result.entities, "the surviving chunks' entities must still be returned"
         covered = {page for entity in result.entities for page in entity.source_pages}
         assert covered - doomed, "no pages outside the failed chunk contributed entities"
+
+    async def test_pages_lost_in_a_half_recovered_chunk_are_reported(self):
+        """A split retry that half-succeeds must not report a clean chunk.
+
+        Otherwise pages vanish from the analysis with nothing recording it --
+        the stage says "7 chunks, 0 failures" while four pages were never read.
+        """
+        doomed = {9, 10, 11, 12}
+        provider = FlakyProvider(poison_pages=doomed, permanent=True)
+        llm = LLMClient(provider, persist_logs=False)
+        result = await EntityExtractionStage(llm).run(composite_pages())
+
+        assert doomed.issubset(set(result.pages_not_read)), (
+            f"pages {sorted(doomed)} were never read but the stage reported {result.pages_not_read}"
+        )
+        assert result.entities, "the readable half of the chunk must still contribute"
 
 
 class TestTruncatedOutputIsSalvaged:

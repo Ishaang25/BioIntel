@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -157,6 +158,12 @@ class AnalysisPipeline:
                 "evidence adjudication were not performed by a model."
             )
 
+        # A retry re-executes stages that already wrote rows on the previous
+        # attempt. Without this, attempt 2 dies on
+        # `UNIQUE constraint failed: company_profiles.run_id` -- so the retry
+        # mechanism that exists to recover from a transient failure instead
+        # guarantees a different one.
+        _reset_run_artefacts(run_id)
         _mark_started(run_id, self.llm.provider_name)
         _seed_stages(run_id)
 
@@ -534,12 +541,32 @@ class AnalysisPipeline:
         context.claims = result
 
         if not result.claims:
+            # Say which of the two very different things happened. Every
+            # candidate's fate is in the audit, so the answer is not a guess.
+            audit = result.audit.to_dict()
+            log.error(
+                "claims.none_survived",
+                candidates=result.candidates,
+                batches=result.batches,
+                batch_failures=result.batch_failures,
+                rejections=audit["by_reason"],
+            )
+            if result.candidates:
+                raise PipelineError(
+                    f"The model extracted {result.candidates} candidate claim(s) from this "
+                    "document but none survived verification: "
+                    f"{_rejection_summary(result.audit)}. This is a verification failure, "
+                    "not an empty document.",
+                    detail={"rejections": audit},
+                )
             raise PipelineError(
                 "No verifiable scientific claims could be extracted from this document. "
-                "It may not be a biotech pitch deck, or its text may be unreadable."
+                "It may not be a biotech pitch deck, or its text may be unreadable.",
+                detail={"rejections": audit},
             )
 
         entity_index = context.entities.by_name() if context.entities else {}
+        unlinked: Counter[str] = Counter()
 
         with session_scope() as session:
             entity_rows = {
@@ -585,13 +612,33 @@ class AnalysisPipeline:
                     if entity_id and entity_id not in linked:
                         session.add(ClaimEntity(claim_id=row.id, entity_id=entity_id))
                         linked.add(entity_id)
+                    elif entity is None:
+                        unlinked["no_matching_entity"] += 1
+                    elif entity_id is None:
+                        unlinked["entity_not_persisted"] += 1
 
+        if unlinked:
+            # A claim links to nothing when entity extraction under-recalled or
+            # the two stages disagree on normalisation. Never fatal -- claims
+            # stand on their own quotes -- but it degrades retrieval, so it is
+            # recorded rather than swallowed.
+            log.info("claims.entity_links_missing", **dict(unlinked))
         if result.dropped_unverifiable:
             context.warn(
                 f"{result.dropped_unverifiable} extracted claim(s) were discarded because their "
                 "supporting quote could not be located in the document."
             )
-        context.record(PipelineStage.CLAIMS, result.metrics())
+        if result.pages_not_read:
+            pages = ", ".join(str(p) for p in result.pages_not_read[:20])
+            context.warn(
+                f"{len(result.pages_not_read)} page(s) could not be read during claim "
+                f"extraction (pages {pages}); any claims they make are absent from this "
+                "analysis."
+            )
+        context.record(
+            PipelineStage.CLAIMS,
+            {**result.metrics(), "entity_link_failures": dict(unlinked)},
+        )
 
     async def _stage_retrieval(self, context: RunContext, document: Document) -> None:
         assert self.llm is not None and self.retriever is not None
@@ -1278,6 +1325,14 @@ def _value(enum_or_str: Any) -> str:
     return enum_or_str.value if hasattr(enum_or_str, "value") else str(enum_or_str)
 
 
+def _rejection_summary(audit: Any, limit: int = 3) -> str:
+    """Human-readable "why nothing survived", for the error a user sees."""
+    top = audit.reasons.most_common(limit)
+    if not top:
+        return "no reason was recorded"
+    return ", ".join(f"{count} x {reason.replace('_', ' ')}" for reason, count in top)
+
+
 def _fallback_query(verified: VerifiedClaim) -> str:
     """Keyword query used when the model's query planner fails for a claim."""
     from app.extraction import lexicon
@@ -1463,6 +1518,21 @@ def _claim_summaries(context: RunContext) -> tuple[list[dict[str, Any]], dict[st
                 "credibility_score": round(score.credibility_score, 1) if score else None,
                 "band": score.band.value if score else None,
                 "confidence": round(score.confidence, 2) if score else None,
+                # The evidence state travels with the claim into the memo, so
+                # the report writer can tell the reader whether a claim is
+                # unverified or disputed -- two things a bare score conflates.
+                "evidence_state": score.evidence_state.value if score else None,
+                "evidence_level": (
+                    score.evidence.evidence_level.value
+                    if score and score.evidence and score.evidence.evidence_level
+                    else None
+                ),
+                "retrieval_status": (
+                    score.evidence.retrieval_status.value if score and score.evidence else None
+                ),
+                "requires_audit": bool(score and score.requires_audit),
+                "contradicted": bool(score and score.evidence and score.evidence.contradicted),
+                "evidence_note": (score.evidence.note if score and score.evidence else ""),
                 "supporting_count": score.supporting_count if score else 0,
                 "contradicting_count": score.contradicting_count if score else 0,
                 "neutral_count": score.neutral_count if score else 0,
@@ -1609,6 +1679,44 @@ def _mark_started(run_id: str, provider: str) -> None:
             "retrieval_enabled": settings.retrieval_enabled,
             "evidence_per_claim": settings.evidence_per_claim,
         }
+
+
+#: Everything a run writes that is keyed by ``run_id``, ordered so that a
+#: child is always deleted before its parent.
+_RUN_ARTEFACT_TABLES = (
+    ClaimEvidenceLink,
+    ClaimAssessment,
+    Claim,
+    Entity,
+    CompanyProfile,
+    PageUnderstanding,
+    DiligenceQuestion,
+    RiskFlag,
+    Report,
+    RunStage,
+)
+
+
+def _reset_run_artefacts(run_id: str) -> None:
+    """Delete anything a previous attempt of this run wrote.
+
+    Reruns must be idempotent. Stages persist as they go -- deliberately, so a
+    late failure still leaves the analyst everything produced so far -- which
+    means a second attempt starts against a database that already holds the
+    first attempt's rows.
+    """
+    deleted: dict[str, int] = {}
+    with session_scope() as session:
+        # ClaimEntity is a join table with no run_id of its own; it has to go
+        # via the claims it belongs to, before those claims are deleted.
+        claim_ids = select(Claim.id).where(Claim.run_id == run_id)
+        session.execute(ClaimEntity.__table__.delete().where(ClaimEntity.claim_id.in_(claim_ids)))
+        for model in _RUN_ARTEFACT_TABLES:
+            result = session.execute(model.__table__.delete().where(model.run_id == run_id))
+            if result.rowcount:
+                deleted[model.__tablename__] = int(result.rowcount)
+    if deleted:
+        log.info("run.previous_attempt_cleared", run_id=run_id, **deleted)
 
 
 def _seed_stages(run_id: str) -> None:

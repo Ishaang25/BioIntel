@@ -95,7 +95,7 @@ def render_markdown(
     )
 
     if scorecard:
-        lines.extend(_render_scorecard(scorecard))
+        lines.extend(_render_scorecard(scorecard, report.dimension_narratives))
 
     for section in sorted(report.sections, key=lambda s: s.get("order", 0)):
         lines.extend([f"## {section['heading']}", "", section["body_markdown"].strip(), ""])
@@ -112,7 +112,34 @@ def render_markdown(
                 ]
             )
 
+    if report.top_questions:
+        lines.extend(_render_top_questions(report.top_questions))
+
     lines.extend(["## Recommendation", "", report.recommendation.strip(), ""])
+
+    if report.recommendation_drivers:
+        # Traceability: the reader can audit the verdict against the evidence
+        # states that produced it without rereading the memo.
+        lines.extend(
+            [
+                "**This recommendation follows from:**",
+                "",
+                *(f"- {driver}" for driver in report.recommendation_drivers),
+                "",
+            ]
+        )
+
+    if report.confidence_reasons:
+        lines.extend(
+            [
+                f"**Why assessment confidence is {report.confidence:.2f}.** Confidence is a "
+                "statement about how much could be checked, not about how good the science "
+                "is — the two move independently.",
+                "",
+                *(f"- {reason}" for reason in report.confidence_reasons),
+                "",
+            ]
+        )
 
     if report.citations:
         lines.extend(["## References", ""])
@@ -229,23 +256,30 @@ def render_html(
 """
 
 
-def _render_scorecard(scorecard: dict[str, Any]) -> list[str]:
-    """The ten-dimension scorecard as a markdown table.
+def _render_scorecard(
+    scorecard: dict[str, Any], narratives: list[dict[str, Any]] | None = None
+) -> list[str]:
+    """The scorecard, with every score explaining itself.
 
-    Rendered by BioIntel rather than written by the model, so the numbers in
-    the memo are always the computed ones.
+    Rendered by BioIntel rather than written by the model, so the numbers and
+    the reasons given for them come from the same computation. A dimension
+    that shows a number without the findings behind it is an assertion; one
+    whose explanation was written separately from its score will eventually
+    contradict it.
     """
     dimensions = scorecard.get("dimensions") or []
     if not dimensions:
         return []
+
+    by_dimension = {n["dimension"]: n for n in (narratives or [])}
 
     lines = [
         "## Investment Committee Scorecard",
         "",
         (
             "Scores are computed deterministically from the claim-level analysis. "
-            "A dimension marked *not assessed* had no claims bearing on it — that is a gap "
-            "in the deck, not a negative finding."
+            "*Not assessed* means no claim bore on the dimension — a gap in the deck. "
+            "*n/a* means the dimension does not apply to this kind of company."
         ),
         "",
         "| Dimension | Score | Band | Confidence | What it answers |",
@@ -253,7 +287,10 @@ def _render_scorecard(scorecard: dict[str, Any]) -> list[str]:
     ]
     for dimension in dimensions:
         score = dimension.get("score")
-        score_cell = f"**{score:.0f}**/100" if isinstance(score, int | float) else "—"
+        if isinstance(score, int | float):
+            score_cell = f"**{score:.0f}**/100"
+        else:
+            score_cell = "n/a" if dimension.get("applicable") is False else "—"
         band = _humanise(dimension.get("band") or "not assessed")
         confidence = _humanise(dimension.get("confidence_band") or "—")
         lines.append(
@@ -268,27 +305,75 @@ def _render_scorecard(scorecard: dict[str, Any]) -> list[str]:
             "dimension weighting is set by archetype, because a platform company and a "
             "single-asset company do not carry the same risks.",
             "",
-            f"**Recommendation: {_humanise(scorecard.get('recommendation', ''))}.** "
-            f"{scorecard.get('recommendation_rationale', '')}",
-            "",
         ]
     )
 
-    weak = [
+    # Every assessed dimension explains itself, from the evidence graph.
+    scored = [
         d
         for d in dimensions
-        if isinstance(d.get("score"), int | float) and d["score"] < 50 and d.get("negative_drivers")
+        if isinstance(d.get("score"), int | float) and by_dimension.get(d.get("dimension"))
     ]
-    if weak:
-        lines.extend(["### What is holding the score down", ""])
-        for dimension in weak[:4]:
-            lines.append(f"- **{dimension.get('label')}** — {dimension.get('rationale', '')}")
-            for driver in (dimension.get("negative_drivers") or [])[:2]:
-                reason = driver.get("reason", "")
-                ref = driver.get("claim_id", "")
-                lines.append(f"  - {reason}" + (f" ({ref})" if ref else ""))
-        lines.append("")
+    if scored:
+        lines.extend(["### Why each dimension scored what it did", ""])
+        for dimension in sorted(scored, key=lambda d: d.get("score") or 0.0):
+            narrative = by_dimension[dimension["dimension"]]
+            lines.append(
+                f"**{narrative['label']} — {narrative['score']:.0f}/100** "
+                f"({_humanise(narrative.get('band') or '')}, "
+                f"confidence {_humanise(narrative.get('confidence_band') or '')})"
+            )
+            lines.append("")
+            lines.extend(f"- {driver}" for driver in narrative.get("drivers", []))
+            reasons = narrative.get("confidence_reasons") or []
+            if reasons and narrative.get("confidence_band") != "high":
+                lines.append(f"- _Confidence:_ {reasons[0]}")
+            move = narrative.get("what_would_move_it")
+            if move:
+                lines.append(f"- _Would move it:_ {move}")
+            lines.append("")
 
+    not_applicable = [d for d in dimensions if d.get("applicable") is False]
+    if not_applicable:
+        lines.extend(
+            [
+                "### Dimensions that do not apply",
+                "",
+                "This company is not developing a medical product, so these axes would "
+                "produce numbers that look like findings but measure nothing:",
+                "",
+                *(f"- {d.get('label')}" for d in not_applicable),
+                "",
+            ]
+        )
+
+    return lines
+
+
+def _render_top_questions(questions: list[dict[str, Any]]) -> list[str]:
+    """The five questions worth asking, ranked by what their answers change.
+
+    A list of fifteen good questions is a way of not choosing. These are
+    ordered by expected impact on the decision, computed from the evidence
+    state of the claims each one would resolve.
+    """
+    lines = [
+        "## Diligence Priorities",
+        "",
+        "Ranked by how much the answer would move the investment decision — a question "
+        "attached to a contradicted thesis-critical claim can change the recommendation; "
+        "one attached to a corroborated peripheral claim cannot.",
+        "",
+    ]
+    for item in questions:
+        lines.append(f"**{item['rank']}. {item['question']}**")
+        lines.append("")
+        lines.append(f"- Why it ranks here: {item['why_it_matters']}")
+        if item.get("what_good_looks_like"):
+            lines.append(f"- A good answer contains: {item['what_good_looks_like']}")
+        if item.get("priority"):
+            lines.append(f"- Priority: {_humanise(item['priority'])}")
+        lines.append("")
     return lines
 
 

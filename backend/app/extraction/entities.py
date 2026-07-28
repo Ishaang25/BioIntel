@@ -34,6 +34,7 @@ from app.core.enums import EntityType
 from app.core.logging import get_logger
 from app.extraction import lexicon
 from app.llm import prompts
+from app.llm.budgets import output_budget
 from app.llm.client import LLMClient
 from app.llm.schemas import CompanyProfileOut, EntityExtractionOut, ExtractedEntity
 from app.utils.chunking import PageChunk, chunk_pages, render_pages_for_prompt
@@ -91,6 +92,9 @@ class EntityExtractionResult:
     chunk_failures: int = 0
     chunk_retries: int = 0
     duplicates_merged: int = 0
+    #: Pages the model never successfully read, including halves lost during a
+    #: split retry. Entities named only on those pages are missing.
+    pages_not_read: list[int] = field(default_factory=list)
     max_chunk_input_tokens: int = 0
 
     def metrics(self) -> dict[str, Any]:
@@ -105,6 +109,7 @@ class EntityExtractionResult:
             "chunk_failures": self.chunk_failures,
             "chunk_retries": self.chunk_retries,
             "duplicates_merged": self.duplicates_merged,
+            "pages_not_read": self.pages_not_read,
             "max_chunk_input_tokens": self.max_chunk_input_tokens,
             "by_type": by_type,
         }
@@ -150,9 +155,11 @@ class EntityExtractionStage:
         extracted: list[tuple[ExtractedEntity, PageChunk]] = []
         failures = 0
         retries = 0
+        pages_lost: list[int] = []
         for chunk, outcome in zip(chunks, outcomes, strict=True):
             if isinstance(outcome, BaseException):
                 failures += 1
+                pages_lost.extend(chunk.page_numbers)
                 log.warning(
                     "entities.chunk_failed",
                     chunk=chunk.index,
@@ -160,8 +167,12 @@ class EntityExtractionStage:
                     error=str(outcome)[:300],
                 )
                 continue
-            entities, chunk_retries = outcome
+            entities, chunk_retries, chunk_lost = outcome
             retries += chunk_retries
+            if chunk_lost:
+                # A split retry that only half-succeeded still lost pages.
+                pages_lost.extend(chunk_lost)
+                log.warning("entities.chunk_partially_lost", chunk=chunk.index, pages=chunk_lost)
             extracted.extend((entity, chunk) for entity in entities)
 
         resolved: dict[tuple[EntityType, str], ResolvedEntity] = {}
@@ -190,21 +201,27 @@ class EntityExtractionStage:
             chunk_failures=failures,
             chunk_retries=retries,
             duplicates_merged=merged,
+            pages_not_read=sorted(set(pages_lost)),
             max_chunk_input_tokens=max((c.token_estimate for c in chunks), default=0),
         )
         log.info("entities.completed", **result.metrics())
         return result
 
     # ------------------------------------------------------------ internal ---
-    async def _extract_chunk(self, chunk: PageChunk) -> tuple[list[ExtractedEntity], int]:
+    async def _extract_chunk(
+        self, chunk: PageChunk
+    ) -> tuple[list[ExtractedEntity], int, list[int]]:
         """Extract one chunk, splitting and retrying it alone if it fails.
 
         Only the failed chunk is re-sent -- never the whole document.  A chunk
         that overflowed its output budget is halved before the retry, because
         asking the same question again gets the same oversized answer.
+
+        Returns the entities, the number of retries, and any pages that were
+        still never read, so a half-recovered chunk cannot pass for a whole one.
         """
         try:
-            return list(await self._call(chunk)), 0
+            return list(await self._call(chunk)), 0, []
         except Exception as exc:
             halves = chunk.split()
             if not halves:
@@ -218,12 +235,14 @@ class EntityExtractionStage:
 
         recovered: list[ExtractedEntity] = []
         retries = 0
+        lost: list[int] = []
         results = await asyncio.gather(
             *(self._call(half) for half in halves), return_exceptions=True
         )
         for half, outcome in zip(halves, results, strict=True):
             retries += 1
             if isinstance(outcome, BaseException):
+                lost.extend(half.page_numbers)
                 log.warning(
                     "entities.chunk_retry_failed",
                     chunk=chunk.index,
@@ -236,9 +255,10 @@ class EntityExtractionStage:
             raise EntityChunkError(
                 f"Entity extraction failed for pages {chunk.page_numbers} after splitting."
             )
-        return recovered, retries
+        return recovered, retries, lost
 
     async def _call(self, chunk: PageChunk) -> list[ExtractedEntity]:
+        effort = settings.llm_extraction_reasoning_effort
         output = await self.llm.structured(
             purpose="entities",
             stage="entities",
@@ -248,8 +268,15 @@ class EntityExtractionStage:
             ),
             schema=EntityExtractionOut,
             model=settings.model_extraction,
-            max_output_tokens=settings.extraction_chunk_output_tokens,
-            reasoning_effort=settings.llm_extraction_reasoning_effort,
+            # Room for the entity list *plus* the reasoning that precedes it;
+            # sizing this from the answer alone starves the model and returns
+            # an empty response. See app.llm.budgets.
+            max_output_tokens=output_budget(
+                settings.model_extraction,
+                content_tokens=settings.extraction_chunk_output_tokens,
+                effort=effort,
+            ),
+            reasoning_effort=effort,
             enforce_input_budget=True,
             context={"pages": chunk.pages},
         )
@@ -428,7 +455,11 @@ class CompanyProfileStage:
             ),
             schema=CompanyProfileOut,
             model=settings.model_fast,
-            max_output_tokens=settings.extraction_chunk_output_tokens,
+            max_output_tokens=output_budget(
+                settings.model_fast,
+                content_tokens=settings.extraction_chunk_output_tokens,
+                effort=settings.llm_extraction_reasoning_effort,
+            ),
             reasoning_effort=settings.llm_extraction_reasoning_effort,
             context={
                 "document_text": truncate(document_text, 40_000),

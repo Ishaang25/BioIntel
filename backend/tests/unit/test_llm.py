@@ -207,6 +207,8 @@ class TestPrompts:
             "risks": "r",
             "questions": "q",
             "section_plan": "p",
+            "evidence_ledger": "l",
+            "section_claims": "sc",
         },
     }
 

@@ -20,7 +20,15 @@ $claims
 
 $risks
 
-## Top diligence questions
+## Counted evidence, confidence and recommendation drivers
+
+$evidence_ledger
+
+## Claim routing — which section owns which claims
+
+$section_claims
+
+## Top diligence questions, ranked by impact
 
 $questions
 
@@ -104,14 +112,67 @@ order wherever both apply. Never blend them into one sentence.
 3. **The gap between claimed and evidenced stage.** Where a deck's pipeline chart and the
    trial registry disagree, that is a finding, not a footnote.
 
+## Each section earns its place
+
+Every section declares what it **owns** and what it **must not repeat**. Honour both.
+
+The failure mode is real and measured: in a previous memo, "Evidence Base" and
+"Contradictions" cited 32 of the same 42 claims and made substantially the same points
+under different headings. A reader who has read one section must learn something *new*
+from the next. Before writing a sentence, ask which section owns it — and if the answer
+is a different one, cut it.
+
+Where a later section needs a fact an earlier one established, refer to it in one clause
+("beyond the unverified pipeline stages noted above") rather than restating the case.
+
+## Prose
+
+Write like an analyst briefing a partner, not like a compliance document.
+
+- **Sentences average under 25 words.** The previous memo averaged 35–59, with sections
+  built from five sentences each. Break them up. A 50-word sentence carrying four
+  citations is not rigour, it is a refusal to prioritise.
+- **Paragraphs of 2–4 sentences.** White space is how a reader finds the argument.
+- **Use bullets for enumerable things**: programmes, discrepancies, requested documents,
+  competing agents. Use prose for argument and judgement. A section that is all prose is
+  usually hiding a list.
+- **Vary the opening.** Do not begin successive paragraphs with the same construction.
+- **"BioIntel assesses that" is capped at twice in the entire memo.** It appeared 15 times
+  in the previous version. Mark inference by writing plainly — "This implies", "The more
+  likely reading is", "On the evidence retrieved, X does not follow" — or by stating the
+  judgement directly. The reader knows whose analysis they are reading.
+- Prefer the concrete noun to the abstract one: "the 15-participant basket" beats "the
+  clinical dataset".
+
 ## Tone and length
 
 Neutral, specific, unhedged about uncertainty. No superlatives, no sales language, no
 imitation of the deck's framing. Do not make a financial recommendation — `recommendation`
 covers what scientific work should happen next and what would change the assessment.
 
-Each section 150-400 words of substance, plus its `so_what`. Markdown: short paragraphs,
-tables where they compress well, bullets only for genuinely enumerable items.
+Each section 150–350 words of substance, plus its `so_what`. Sections with a word cap in
+their instruction must respect it.
+
+## The executive summary
+
+Structured, not prose. It is the page read in the meeting.
+
+- `investment_thesis` — 2–3 sentences, plain language, no citations. What is the bet?
+- `key_strengths` — 3–5 one-line bullets of what is genuinely established, strongest
+  first, each citing its evidence. If little is established, write fewer bullets. Never
+  pad this list to look balanced.
+- `key_risks` — 3–5 one-line bullets, most decision-relevant first. The wording must
+  distinguish "contradicted by the record" from "nobody could check it".
+- `recommendation_line` — one sentence, matching the computed recommendation supplied.
+- `diligence_priorities` — exactly 3 actions, each naming the document or dataset to
+  request. Take them from the ranked questions.
+
+## Explanations BioIntel renders itself
+
+Per-dimension driver bullets, the confidence reasons, the recommendation drivers and the
+ranked top-five questions are computed and rendered by BioIntel. **Do not reproduce them.**
+Your job is the interpretation around them: what the pattern means, which two or three
+findings actually decide this investment, and what an analyst should do about it.
 
 ## Limitations
 

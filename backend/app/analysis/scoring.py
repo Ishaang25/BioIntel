@@ -39,6 +39,12 @@ from typing import Any
 
 from app.analysis.claim_policy import ClaimPolicy, policy_for
 from app.analysis.corroboration import CorroborationAssessment
+from app.analysis.evidence_state import (
+    NO_INFORMATION_ANCHOR,
+    ClaimEvidence,
+    derive_evidence,
+    informed_aggregate,
+)
 from app.core.enums import (
     ADVERSE_CORROBORATION,
     UNCHECKED_CORROBORATION,
@@ -47,6 +53,7 @@ from app.core.enums import (
     ConfidenceLevel,
     CorroborationStatus,
     CredibilityBand,
+    EvidenceState,
     EvidenceTier,
     QuoteVerification,
     confidence_level,
@@ -144,10 +151,28 @@ class ClaimScore:
     #: Plain-language explanation of the score, always populated.
     explanation: str = ""
     breakdown: dict[str, Any] = field(default_factory=dict)
+    #: The single evidence signal downstream consumers read. Carries the
+    #: state, how much it licenses a conclusion, and how the search itself
+    #: went -- so no consumer has to re-derive uncertainty and charge for it
+    #: a second time.
+    evidence: ClaimEvidence | None = None
 
     @property
     def confidence_band(self) -> ConfidenceLevel:
         return confidence_level(self.confidence)
+
+    @property
+    def evidence_state(self) -> EvidenceState:
+        return self.evidence.state if self.evidence else EvidenceState.NOT_APPLICABLE
+
+    @property
+    def informativeness(self) -> float:
+        """How much this claim licenses a conclusion about a dimension."""
+        return self.evidence.informativeness if self.evidence else 0.0
+
+    @property
+    def requires_audit(self) -> bool:
+        return bool(self.evidence and self.evidence.requires_audit)
 
 
 def score_claim(
@@ -213,6 +238,19 @@ def score_claim(
         corroboration=corroboration,
     )
 
+    evidence = derive_evidence(
+        claim_id=claim.claim_id,
+        claim_type=claim.claim_type,
+        credibility=round(score, 2),
+        confidence=round(confidence, 4),
+        corroboration=corroboration,
+    )
+    if evidence.requires_audit:
+        explanation += (
+            " This claim rests on data only the company holds, so it is recorded as a "
+            "company assertion requiring audit rather than as a scientific weakness."
+        )
+
     return ClaimScore(
         claim_id=claim.claim_id,
         credibility_score=round(score, 2),
@@ -226,7 +264,9 @@ def score_claim(
         consistency=_consistency(corroboration),
         scored=True,
         explanation=explanation,
+        evidence=evidence,
         breakdown={
+            **evidence.to_dict(),
             "claim_type": _value(claim.claim_type),
             "verifiability": policy.verifiability.value,
             "prior": round(prior, 4),
@@ -258,6 +298,13 @@ def _unscored(
     corroboration: CorroborationAssessment | None,
 ) -> ClaimScore:
     """A claim excluded from credibility scoring by its type."""
+    evidence = derive_evidence(
+        claim_id=claim.claim_id,
+        claim_type=claim.claim_type,
+        credibility=0.0,
+        confidence=1.0,
+        corroboration=corroboration,
+    )
     return ClaimScore(
         claim_id=claim.claim_id,
         credibility_score=0.0,
@@ -270,6 +317,7 @@ def _unscored(
         evidence_quality=0.0,
         consistency=0.0,
         scored=False,
+        evidence=evidence,
         explanation=(
             f"Excluded from credibility scoring: this is a "
             f"{_value(claim.claim_type).replace('_', ' ')} statement. "
@@ -453,8 +501,12 @@ def score_run(
             },
         )
 
-    weighted_sum = 0.0
-    weight_total = 0.0
+    # Aggregated with the same uncertainty propagation the scorecard uses, via
+    # the same primitive, so the headline number and the dimensions cannot
+    # drift apart. A plain weighted mean of credibility here silently averaged
+    # in the priors of every claim we could not check, which is what held an
+    # approved commercial leader at 48.9/100.
+    entries: list[tuple[float, float, bool]] = []
     for score in scorable:
         claim = claim_inputs.get(score.claim_id)
         if claim is None:
@@ -464,10 +516,10 @@ def score_run(
             * (0.35 + 0.65 * claim.importance)
             * (1.6 if claim.is_thesis_critical else 1.0)
         )
-        weighted_sum += score.credibility_score * weight
-        weight_total += weight
+        is_gap = bool(score.evidence and score.evidence.is_information_gap)
+        entries.append((score.credibility_score, weight, is_gap))
 
-    base = weighted_sum / weight_total if weight_total else 0.0
+    base, information_ratio = informed_aggregate(entries)
 
     # --- penalties: only for genuine adverse findings ---------------------
     contradicted_critical = sum(
@@ -477,7 +529,19 @@ def score_run(
         and (claim_inputs.get(s.claim_id) or _NULL_CLAIM).is_thesis_critical
     )
     contradicted_any = sum(1 for s in scorable if s.corroboration in ADVERSE_CORROBORATION)
-    contradiction_penalty = min(20.0, 7.0 * contradicted_critical + 1.5 * contradicted_any)
+    critical_total = max(1, sum(1 for c in claim_inputs.values() if c.is_thesis_critical))
+    # Charged on the *share* of the thesis that is contradicted, not the count.
+    #
+    # Each contradicted claim has already been marked down heavily inside the
+    # weighted mean -- the Moderna pipeline-stage discrepancy fell from a 0.70
+    # prior to 33/100. A flat per-claim penalty here bills the same finding a
+    # second time, and bills a thoroughly-extracted deck more than a sparse one
+    # for identical underlying facts. What survives is the genuinely emergent
+    # signal: a *pattern* of contradictions is worse than the sum of its parts.
+    contradiction_penalty = min(
+        12.0,
+        12.0 * (contradicted_critical / critical_total) + 3.0 * (contradicted_any / len(scorable)),
+    )
 
     coverage = (pages_analysed / pages_total) if pages_total else 1.0
     coverage_penalty = max(0.0, (1.0 - coverage) * 8.0)
@@ -518,6 +582,8 @@ def score_run(
             "contradicted_claims": contradicted_any,
             "thesis_critical_claims": sum(1 for c in claim_inputs.values() if c.is_thesis_critical),
             "thesis_critical_contradicted": contradicted_critical,
+            "information_ratio": round(information_ratio, 4),
+            "no_information_anchor": NO_INFORMATION_ANCHOR,
             "penalties": {
                 "contradiction": round(contradiction_penalty, 2),
                 "page_coverage": round(coverage_penalty, 2),

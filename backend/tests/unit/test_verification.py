@@ -484,6 +484,12 @@ class TestArchetypeDetection:
             )
             for i in range(4)
         ]
+        # A platform *biotech* always names some biology alongside the platform
+        # story; "we have a platform" on its own is a claim a software company
+        # makes too, and is not by itself evidence of a life-sciences company.
+        inputs.append(
+            make_input("m1", ClaimType.MECHANISM, CorroborationStatus.PLAUSIBLE_UNVERIFIED)
+        )
         assert detect_archetype(inputs, pipeline_size=6) is CompanyArchetype.PLATFORM
 
     def test_preclinical_only_company_is_detected(self):

@@ -350,7 +350,81 @@ class CompanyArchetype(StrEnum):
     COMMERCIAL_STAGE = "commercial_stage"
     TOOLS_AND_SERVICES = "tools_and_services"
     DIAGNOSTICS = "diagnostics"
+    MEDICAL_DEVICE = "medical_device"
+    HEALTHCARE_SOFTWARE = "healthcare_software"
+    HEALTHCARE_SERVICES = "healthcare_services"
+    #: Not a life-sciences company at all. Scoring one of these on scientific
+    #: validity and translational readiness produces numbers that look like
+    #: findings but measure nothing -- a satellite-communications deck scored
+    #: 36.7 for "scientific validity" purely because those axes were applied.
+    NON_BIOMEDICAL = "non_biomedical"
     UNKNOWN = "unknown"
+
+
+#: Archetypes the biomedical scoring framework genuinely applies to.
+BIOMEDICAL_ARCHETYPES = frozenset(
+    {
+        CompanyArchetype.PLATFORM,
+        CompanyArchetype.CLINICAL_STAGE_ASSET,
+        CompanyArchetype.PRECLINICAL_ASSET,
+        CompanyArchetype.COMMERCIAL_STAGE,
+        CompanyArchetype.DIAGNOSTICS,
+        CompanyArchetype.MEDICAL_DEVICE,
+        CompanyArchetype.UNKNOWN,
+    }
+)
+
+
+class EvidenceState(StrEnum):
+    """What we established about a claim, as one value.
+
+    The scorecard consumes this rather than re-deriving uncertainty from
+    corroboration status at every dimension -- which is how a single
+    verification gap came to be charged against scientific validity, evidence
+    quality, execution, platform and commercial readiness simultaneously.
+    """
+
+    #: External evidence confirms it.
+    VERIFIED = "verified"
+    #: External evidence confirms part of it.
+    PARTIALLY_VERIFIED = "partially_verified"
+    #: Nothing found to support it, and nothing against it. An information
+    #: gap, not a finding. Lowers confidence, not credibility.
+    PLAUSIBLE_UNVERIFIED = "plausible_unverified"
+    #: Rests on data only the company holds (internal metrics, proprietary
+    #: assays, unpublished preclinical work). Requires audit, not scepticism.
+    COMPANY_REPORTED = "company_reported"
+    #: External evidence genuinely disagrees.
+    CONTRADICTED = "contradicted"
+    #: Inconsistent with established biology. The only state that earns a
+    #: strong negative penalty on its own.
+    IMPLAUSIBLE = "implausible"
+    #: Not a factual claim about the present world.
+    NOT_APPLICABLE = "not_applicable"
+
+
+#: States that are evidence *against* a claim. Nothing else may reduce a
+#: credibility score below its prior.
+ADVERSE_EVIDENCE_STATES = frozenset({EvidenceState.CONTRADICTED, EvidenceState.IMPLAUSIBLE})
+
+#: States that mean "we could not check", which belong in confidence.
+UNVERIFIED_EVIDENCE_STATES = frozenset(
+    {EvidenceState.PLAUSIBLE_UNVERIFIED, EvidenceState.COMPANY_REPORTED}
+)
+
+
+class RetrievalStatus(StrEnum):
+    """How the evidence search itself went.
+
+    Recorded independently of what the evidence said, so that a failed search
+    can never be read as a negative finding. ``NONE`` and ``ERROR`` are facts
+    about BioIntel; only the adjudicated stance is a fact about the company.
+    """
+
+    FOUND = "found"
+    PARTIAL = "partial"
+    NONE = "none"
+    ERROR = "error"
 
 
 class EvidenceTier(StrEnum):

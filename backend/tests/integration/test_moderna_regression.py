@@ -218,6 +218,65 @@ class TestRunCompletes:
         assert run.status is RunStatus.SUCCEEDED
 
 
+class TestTheDeckProducesAnAnalysis:
+    """The second Moderna regression: the run reached Claims and stopped.
+
+        PipelineError: No verifiable scientific claims could be extracted from
+        this document. It may not be a biotech pitch deck...
+
+    about a J.P. Morgan investor presentation containing approvals, Phase 3
+    readouts and pipeline updates. The cause was upstream -- an output budget
+    too small to hold the model's reasoning -- but the symptom was here, so
+    the guard belongs here.
+    """
+
+    async def test_claims_are_extracted(self, completed):
+        with session_scope() as session:
+            claims = session.query(Claim).filter_by(run_id=completed).all()
+        assert claims, "a deck of clinical and regulatory statements yielded no claims"
+
+    async def test_entities_are_extracted(self, completed):
+        from app.db.models import Entity
+
+        with session_scope() as session:
+            entities = session.query(Entity).filter_by(run_id=completed).all()
+        assert entities
+
+    async def test_assessment_completes_for_every_claim(self, completed):
+        with session_scope() as session:
+            claims = session.query(Claim).filter_by(run_id=completed).all()
+            assessments = session.query(ClaimAssessment).filter_by(run_id=completed).all()
+        assert len(assessments) == len(claims)
+
+    async def test_a_recommendation_is_generated(self, completed):
+        with session_scope() as session:
+            report = session.query(Report).filter_by(run_id=completed).one()
+        assert report.recommendation
+        assert report.ic_recommendation
+
+    async def test_every_stage_reached_a_terminal_state(self, completed):
+        from app.core.enums import StageStatus
+        from app.db.models import RunStage
+
+        with session_scope() as session:
+            stages = session.query(RunStage).filter_by(run_id=completed).all()
+        assert stages
+        for stage in stages:
+            assert stage.status in (StageStatus.SUCCEEDED, StageStatus.SKIPPED), (
+                f"{stage.stage} ended {stage.status}: {stage.error_message}"
+            )
+
+    async def test_claim_extraction_reports_what_it_discarded(self, completed):
+        """A stage that drops candidates must say which, and why."""
+        with session_scope() as session:
+            run = session.get(AnalysisRun, completed)
+        rejections = run.metrics["stages"]["claims"]["rejections"]
+        assert "by_reason" in rejections
+        assert run.metrics["stages"]["claims"]["candidates"] >= len(
+            run.metrics["stages"]["claims"].get("by_category", {})
+        )
+
+
 class TestClaimTypingSeparatesTheDeck:
     async def test_promotional_and_forward_looking_claims_are_identified(self, completed):
         with session_scope() as session:

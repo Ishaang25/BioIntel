@@ -28,7 +28,7 @@ from tenacity import (
 )
 
 from app.core.config import settings
-from app.core.errors import LLMError
+from app.core.errors import LLMError, LLMTruncatedError
 from app.core.logging import get_logger
 from app.llm.base import LLMRequest, LLMResponse, Usage
 from app.llm.json_schema import schema_payload
@@ -179,6 +179,7 @@ class OpenAIProvider:
                 status = getattr(response, "status", "completed")
                 incomplete = getattr(response, "incomplete_details", None)
                 truncated = status == "incomplete"
+                usage = self._usage_from(response)
                 if truncated:
                     reason = getattr(incomplete, "reason", "unknown")
                     log.warning(
@@ -186,8 +187,31 @@ class OpenAIProvider:
                         purpose=request.purpose,
                         reason=reason,
                         model=request.model,
+                        output_tokens=usage.output_tokens,
+                        reasoning_tokens=usage.reasoning_tokens,
+                        content_tokens=usage.output_tokens - usage.reasoning_tokens,
                     )
                 if not text.strip():
+                    if truncated:
+                        # The budget was spent before a single visible token was
+                        # written -- on a reasoning model that means reasoning
+                        # consumed all of it. Reported as truncation, not as a
+                        # mystery empty reply, because the remedy is a bigger
+                        # output budget or a smaller request.
+                        raise LLMTruncatedError(
+                            f"Model call '{request.purpose}' produced no visible output: "
+                            f"all {usage.output_tokens} output tokens went to reasoning "
+                            f"before the answer began.",
+                            detail={
+                                "purpose": request.purpose,
+                                "reason": getattr(incomplete, "reason", "unknown"),
+                                "output_tokens": usage.output_tokens,
+                                "reasoning_tokens": usage.reasoning_tokens,
+                                "max_output_tokens": (
+                                    request.max_output_tokens or settings.llm_max_output_tokens
+                                ),
+                            },
+                        )
                     raise LLMError(
                         "OpenAI returned an empty response.",
                         detail={"purpose": request.purpose, "status": status},
@@ -196,7 +220,7 @@ class OpenAIProvider:
                 return LLMResponse(
                     text=text,
                     model=getattr(response, "model", request.model),
-                    usage=self._usage_from(response),
+                    usage=usage,
                     latency_ms=int((time.perf_counter() - started) * 1000),
                     provider=self.name,
                     attempts=attempts,

@@ -58,6 +58,7 @@ produced up to that point.
 | 2 | `page_understanding` | Vision pass over scanned/graphical pages: transcription, chart values, figure descriptions | degrading |
 | 3 | `profile` | Company, lead programme, indication, modality, pipeline, team, ask | degrading |
 | 4 | `entities` | Diseases, targets, drugs, biomarkers, mechanisms, modalities, endpoints — extracted from **parallel page chunks**, merged across chunks, then reconciled with a deterministic gazetteer | degrading |
+
 | 5 | `claims` | Claim extraction from parallel page chunks with verbatim quotes, then **quote verification**, deduplication, importance ranking | **fatal** |
 | 6 | `retrieval` | Per-claim query planning, fan-out to three sources, cross-source dedupe, relevance + quality ranking | degrading |
 | 7 | `adjudication` | Batched claim × evidence stance judgements with abstract-quote verification | degrading |
@@ -117,6 +118,42 @@ reference table built from real persisted rows. After generation every marker
 is resolved; unresolvable ones are stripped from the text and reported as a
 defect. The model is never in a position to invent a PMID, because it never
 writes one — it writes a reference id that must already exist.
+
+### 4.3a The memo explains itself
+
+A score with no explanation is an assertion; an explanation *written by a
+model about a score it did not compute* is worse, because it drifts.
+`app/reporting/narrative.py` derives the explanations from the same evidence
+states the scorer consumed, so a driver bullet cannot contradict its number:
+
+* **dimension drivers** — countable findings behind each score ("4 claims
+  corroborated externally, 18 resting on company-held data, no contradictions,
+  26% of claim weight externally checkable");
+* **confidence reasons** — why we are unsure, stated as facts about the
+  search: low verification coverage, proprietary company data, retrieval
+  returned nothing, source unreachable;
+* **recommendation drivers** — the evidence states that decided the verdict,
+  rendered under the recommendation so a reader can audit it;
+* **ranked diligence priorities** — the top five questions by expected impact,
+  scored from the evidence state of the claims each would resolve. Impact is
+  set by the *most consequential* thing a question settles, so breadth never
+  outranks severity.
+
+The model writes analysis and prose. It does not write the numbers or the
+reasons for them.
+
+### 4.3b Sections with disjoint remits
+
+Every entry in `SECTION_PLAN` declares what it **owns** and what it **must not
+repeat**, and contested claims are routed to the one section that may discuss
+them individually. Without that, adjacent sections converge: measured on the
+CRISPR memo, "Evidence Base" and "Contradictions" cited 32 of the same 42
+claims (Jaccard 0.76) and made the same points under different headings.
+
+The executive summary is structured rather than free prose — thesis,
+strengths, risks, recommendation, three priorities — because the prose version
+reliably returned a single 280-word paragraph of 50-word sentences: complete,
+and unreadable in a meeting.
 
 ### 4.4 Deterministic scoring
 
@@ -179,6 +216,51 @@ CORROBORATION_EFFECT = {
 The two zeroes are the fix. A claim whose check could not be completed sits at
 its prior; only `contradicted` and `disputed` can push a score below it. This
 is enforced by test, over every status and every claim type.
+
+**The same rule has to hold in the aggregates**, and originally it did not. A
+prior is a starting point for evidence, not an assessment — but every
+dimension took a plain weighted mean of credibility, so an unchecked mechanism
+claim contributed its 0.35 prior as though it were a finding. Because one
+claim informs several dimensions, a single verification gap was charged five
+times over. Measured on the benchmark decks: Moderna had 23 claims at
+`insufficient_evidence` averaging 40.8 credibility, and scored 48.9/100 with
+"significant concerns" while marketing two approved products.
+
+So `app/analysis/evidence_state.py` reduces each claim to one signal — an
+`EvidenceState`, a credibility, and an **informativeness**: how much the claim
+licenses any conclusion at all. `informed_aggregate` is then the single
+primitive behind both the run score and every dimension:
+
+* a claim we could not check may *raise* an aggregate when the deck presents
+  it well, but never lower one;
+* missing information is not redistributed as a penalty — the aggregate is
+  pulled toward `NO_INFORMATION_ANCHOR` (58, the bottom of "promising but
+  unproven"), and the shortfall is reported as reduced **confidence**.
+
+Credibility answers "how believable is the science"; confidence answers "how
+certain are we". `verification_coverage` and `RetrievalStatus` are recorded
+alongside both and never folded into either — a failed search is a fact about
+BioIntel, not about the company.
+
+#### 2a. Archetype routing happens before scoring
+
+`scientific_validity` and `translational_readiness` mean nothing for a company
+that is not developing a medical product. A satellite-communications deck was
+scored 36.7 on scientific validity purely because those axes were applied to
+it. `detect_archetype` now asks first whether any biomedical claim types are
+present at all; if not, the company is `NON_BIOMEDICAL`, the biomedical
+dimensions are reported **not applicable** (distinct from *not assessed*), and
+the recommendation says to use a commercial diligence framework instead.
+
+#### 2b. Recommendations follow the evidence, not the number
+
+Strong biology with thin verification and weak biology with strong
+verification can produce the same middling score, and an IC treats them
+oppositely. `_recommend` routes on credibility band, assessment confidence,
+verification coverage and genuine contradiction — so an information gap
+produces "advance with conditions" plus diligence questions, while a
+contradicted thesis-critical claim produces concerns proportionate to how much
+of the thesis it takes down.
 
 ```
 base  = prior + rigour_adjustment + tier_lift          # 0-1
@@ -353,6 +435,23 @@ heartbeat while working; a job whose heartbeat goes stale is re-queued by any
 worker's reaper, which is how a crashed worker recovers. Cancellation is a
 flag the running pipeline polls between stages.
 
+**A job and its run recover together.** Reaping the job alone leaves
+`AnalysisRun.status = running` with nothing alive to advance it, and because
+`create_run` refuses to start a second analysis while one is active, that
+combination locks the document out of the product permanently — surviving
+restarts, because the row is what is wrong. So the reaper transitions the run
+in the same transaction, `recover_orphaned_runs` closes runs whose job is
+already terminal, workers reap on startup rather than after the first poll
+interval, a worker shutting down *releases* in-flight jobs without spending an
+attempt, and `create_run` reclaims an "active" run that no live job owns
+instead of refusing forever. Recovering from a crash must never require
+editing the database.
+
+Retries are idempotent: a second attempt clears the rows the first one wrote
+(`_reset_run_artefacts`). Without that, attempt 2 dies on
+`UNIQUE constraint failed: company_profiles.run_id` — the retry mechanism that
+exists to recover from a transient failure instead guarantees a permanent one.
+
 The decisive benefit: a job and the rows it writes share one transactional
 store, so there is no window where a job is "done" but its results are not
 visible.
@@ -444,6 +543,23 @@ processed concurrently; a chunk whose answer overflows the output budget is
 mid-JSON is salvaged to its last complete element (`app.llm.json_repair`)
 rather than discarded, because resending the same prompt truncates at the same
 place.
+
+On the output side, `max_output_tokens` bounds **reasoning tokens and visible
+output together**, so every budget is `content + reasoning reserve`
+(`app.llm.budgets`). Sizing it from the expected answer alone starves the
+model: a 6,000-token cap on a claim chunk was consumed entirely by gpt-5's
+reasoning and three of four chunks returned *nothing*, which the stage
+reported as a document with no scientific claims in it.
+
+### Failing loudly
+
+A stage that discards work has to say what it discarded. Claim extraction
+records every candidate's fate in a `RejectionAudit` (quote not found,
+duplicate, over the cap, chunk unreadable) that rides along in
+`RunStage.metrics`, and pages a chunk never managed to read are named in
+`pages_not_read` and disclosed as a report limitation. "Nothing survived" and
+"nothing was there" are separate outcomes with separate errors:
+`ClaimExtractionFailed` means the document was never read.
 
 ---
 

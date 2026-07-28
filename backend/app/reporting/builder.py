@@ -20,6 +20,13 @@ from app.core.logging import get_logger
 from app.llm import prompts
 from app.llm.client import LLMClient
 from app.llm.schemas import ReportOut
+from app.reporting.narrative import (
+    confidence_reasons,
+    dimension_narratives,
+    evidence_ledger,
+    rank_questions,
+    recommendation_drivers,
+)
 from app.utils.text import truncate
 
 log = get_logger(__name__)
@@ -28,95 +35,135 @@ CITATION_RE = re.compile(r"\[([CE])(\d+)\]")
 
 #: The memo structure.  Order and headings are fixed so that two BioIntel
 #: reports can be compared side by side, which is how IC packs are read.
+#:
+#: Each section declares what it **owns** and what it **must not repeat**.
+#: Without that, adjacent sections converge: measured on the CRISPR memo,
+#: "Evidence Base" and "Contradictions" cited 32 of the same 42 claims
+#: (Jaccard 0.76), restating the same findings under different headings. An
+#: analyst reading four sections should learn four things.
 SECTION_PLAN: tuple[dict[str, str], ...] = (
     {
         "id": "thesis",
         "heading": "Scientific Thesis",
+        "owns": "what the company is asserting",
         "instruction": (
             "State, in the company's own terms, what scientific proposition the investment "
             "rests on: the target, the mechanism, the modality, the indication, and why the "
-            "company believes it will work. Cite the claims that constitute the thesis."
+            "company believes it will work. Cite the claims that constitute the thesis. "
+            "OWNS: the company's argument. DO NOT evaluate it here, do not cite external "
+            "records, and do not mention verification status -- later sections do that."
         ),
     },
     {
         "id": "evidence_base",
         "heading": "Evidence Base and Its Limits",
+        "owns": "what data the deck itself puts on the table",
         "instruction": (
-            "Characterise the evidence the deck actually presents: which tiers, which model "
-            "systems, what statistical support. Distinguish claims backed by the company's own "
-            "data from claims backed only by citation or by assertion. Be explicit about what "
-            "the deck does not show."
+            "Characterise the evidence the DECK presents: which tiers, which model systems, "
+            "what statistical support, what sample sizes and comparators are stated or "
+            "missing. Distinguish claims backed by the company's own data from claims backed "
+            "only by citation or assertion. "
+            "OWNS: the internal evidence inventory and its methodological gaps. "
+            "DO NOT: discuss external literature, name individual contradictions, or argue "
+            "about species-to-human translation. Those are the next three sections. If a "
+            "claim's problem is that nobody outside the company can check it, name the "
+            "pattern here and leave the specific claims to 'Open and Contested Claims'."
         ),
     },
     {
         "id": "literature",
         "heading": "External Literature Assessment",
+        "owns": "what independent science says about this biology",
         "instruction": (
-            "Summarise what the retrieved literature and trial registry records establish about "
-            "this target, mechanism and indication, independent of the company. Identify the "
-            "strongest corroborating evidence and the strongest disconfirming evidence, citing "
-            "specific records."
+            "Summarise what the retrieved literature and registry records establish about this "
+            "target, mechanism and indication INDEPENDENTLY of the company. Identify the "
+            "strongest corroborating and strongest disconfirming records, citing [E#] ids. "
+            "OWNS: the external scientific picture. "
+            "DO NOT: re-describe the deck's own data, or restate claim-by-claim verification "
+            "status. Where external science agrees or disagrees with the thesis in general "
+            "terms, say so once, here."
         ),
     },
     {
         "id": "contradictions",
-        "heading": "Contradictions and Unsupported Claims",
+        "heading": "Open and Contested Claims",
+        "owns": "the specific claims an analyst must resolve",
         "instruction": (
-            "Give each material contradiction its own paragraph: what the company claims, what "
-            "the conflicting record shows, and how serious the conflict is. Then list the "
-            "thesis-critical claims for which no external corroboration was found, stating "
-            "clearly that this is absence of evidence rather than evidence of absence."
+            "A short, ranked list -- not an essay. Cover ONLY claims that are (a) contradicted "
+            "by evidence, or (b) thesis-critical AND unverified. Ignore everything else. "
+            "For each: one line on what the company claims, one on what the record shows or "
+            "why nothing could be found, and one on what document would settle it. "
+            "OWNS: the specific unresolved items. "
+            "DO NOT: repeat the evidence-tier discussion, re-summarise the literature, or "
+            "include claims that are already corroborated. Keep this under 300 words; a long "
+            "list here means the ranking was not applied."
         ),
     },
     {
         "id": "translational",
         "heading": "Translational Risk",
+        "owns": "the gap between the biology shown and the clinic implied",
         "instruction": (
-            "Assess the distance between the evidence presented and the clinical claim implied: "
-            "species, dose, endpoint, patient population, and the precedent for this class of "
-            "translation succeeding. Reference the trial registry evidence where relevant."
+            "Biology only: species, dose, exposure, endpoint surrogacy, patient population, "
+            "and the precedent for this class of translation succeeding or failing. "
+            "OWNS: the biological argument for why this may not reproduce in humans. "
+            "DO NOT: restate which claims were unverified, re-list evidence tiers, or repeat "
+            "the contradiction list. If the translational risk is genuinely low, say so "
+            "briefly rather than manufacturing concern."
         ),
     },
     {
         "id": "competitive",
         "heading": "Competitive and Precedent Landscape",
+        "owns": "who else has tried this, and what happened",
         "instruction": (
             "Using the retrieved trial records and literature, describe who else has worked on "
             "this target or mechanism and what happened. Note terminated or withdrawn trials "
-            "explicitly. If the retrieval found no precedent, say so and discuss what that means."
+            "explicitly. If retrieval found no precedent, say so and discuss what that means. "
+            "OWNS: third-party programmes and their outcomes. "
+            "DO NOT: re-argue this company's own translational risk or evidence quality."
         ),
     },
     {
         "id": "scorecard",
-        "heading": "Scorecard and What Drives It",
+        "heading": "Reading the Scorecard",
+        "owns": "what the computed numbers mean for the decision",
         "instruction": (
-            "Explain the ten-dimension scorecard using the supplied figures: which dimensions "
-            "carry the case, which hold it back, and what would move each. Distinguish "
-            "dimensions that score low because evidence disagrees from those that score low "
-            "because claims could not be checked -- these have completely different remedies. "
-            "Do not recompute any number and do not reproduce the table; the memo renders it "
-            "separately. Explain what it means."
+            "The memo renders the scorecard table and its driver bullets separately -- do not "
+            "reproduce either. Write the interpretation an analyst cannot get from the table: "
+            "which two or three dimensions actually carry this decision, which are noise at "
+            "this stage, and where the archetype weighting makes a difference. Distinguish "
+            "dimensions scored low because evidence disagrees from those held near neutral "
+            "because nothing could be checked -- different remedies entirely. "
+            "OWNS: interpretation and prioritisation of the dimensions. "
+            "DO NOT: recompute, re-round or re-list the numbers, or restate the driver bullets. "
+            "Under 250 words."
         ),
     },
     {
         "id": "verification",
         "heading": "Regulatory and Registry Verification",
+        "owns": "what authoritative sources returned",
         "instruction": (
-            "Report what was checked against authoritative sources (the FDA drug database and "
-            "ClinicalTrials.gov) and what those checks returned. State clearly which claims "
-            "were confirmed, which were refuted by the public record, and which could not be "
-            "checked and why -- a source that does not cover a product class is a coverage "
-            "gap, not a negative finding. This section tells the reader which parts of the "
-            "regulatory narrative rest on company assertion alone."
+            "Report what was checked against the FDA drug database and ClinicalTrials.gov and "
+            "what those checks returned: confirmed, refuted, or not covered. A source that "
+            "does not index a product class is a coverage gap, not a negative finding -- say "
+            "which it was. "
+            "OWNS: the authoritative-source audit trail. "
+            "DO NOT: repeat the literature assessment or re-list unverified claims in general; "
+            "confine this to what a regulator or registry actually said."
         ),
     },
     {
         "id": "diligence",
         "heading": "Recommended Diligence",
+        "owns": "what to do next, in order",
         "instruction": (
-            "Set out the diligence programme: the questions to put to the company, the data "
-            "rooms to request, and the external experts worth consulting. Group by what each "
-            "would resolve. Reference the question list supplied rather than inventing new ones."
+            "The memo renders the ranked top five questions separately -- do not reproduce "
+            "them. Write the programme around them: which data rooms to request, which "
+            "external experts to consult, what sequence, and what each step would resolve. "
+            "OWNS: the plan of action. "
+            "DO NOT: restate the questions verbatim or invent new ones."
         ),
     },
 )
@@ -154,6 +201,13 @@ class BuiltReport:
     confidence: float
     score_breakdown: dict[str, Any]
     invalid_citations: list[str] = field(default_factory=list)
+    #: Computed explanations, rendered by BioIntel rather than written by the
+    #: model, so an explanation can never contradict the number it explains.
+    dimension_narratives: list[dict[str, Any]] = field(default_factory=list)
+    confidence_reasons: list[str] = field(default_factory=list)
+    recommendation_drivers: list[str] = field(default_factory=list)
+    top_questions: list[dict[str, Any]] = field(default_factory=list)
+    evidence_ledger: dict[str, Any] = field(default_factory=dict)
 
 
 class ReportBuilder:
@@ -176,6 +230,15 @@ class ReportBuilder:
     ) -> BuiltReport:
         scorecard_text = _format_scorecard(overall, claim_summaries, scorecard)
 
+        # Computed once, up front: the memo's explanations and the prompt's
+        # framing are then built from the same arithmetic, so the narrative
+        # cannot drift from the scorecard it describes.
+        ledger = evidence_ledger(claim_summaries)
+        narratives = dimension_narratives(scorecard, claim_summaries)
+        reasons = confidence_reasons(ledger, scorecard, extra_limitations)
+        drivers = recommendation_drivers(scorecard, ledger, overall.score)
+        ranked = rank_questions(questions, claim_summaries)
+
         output: ReportOut = await self.llm.structured(
             purpose="report",
             stage="report",
@@ -187,8 +250,10 @@ class ReportBuilder:
                 scientific_assessment=_format_scientific_assessment(scientific_assessment),
                 claims=_format_claims_with_evidence(claim_summaries),
                 risks=_format_risks(risks),
-                questions=_format_questions(questions),
+                questions=_format_ranked_questions(ranked),
                 section_plan=_format_section_plan(),
+                evidence_ledger=_format_ledger(ledger, reasons, drivers),
+                section_claims=_format_section_routing(claim_summaries),
             ),
             schema=ReportOut,
             model=settings.model_reasoning,
@@ -222,7 +287,7 @@ class ReportBuilder:
 
         return BuiltReport(
             title=output.title or f"Scientific Due Diligence — {company_name or 'Unnamed company'}",
-            executive_summary=output.executive_summary,
+            executive_summary=_render_executive_summary(output.executive_summary),
             sections=sections,
             recommendation=output.recommendation,
             limitations=_dedupe_strings(limitations),
@@ -232,6 +297,22 @@ class ReportBuilder:
             confidence=overall.confidence,
             score_breakdown=overall.breakdown,
             invalid_citations=invalid,
+            dimension_narratives=[n.to_dict() for n in narratives],
+            confidence_reasons=reasons,
+            recommendation_drivers=drivers,
+            top_questions=[
+                {
+                    "rank": index + 1,
+                    "question": question.question,
+                    "priority": _value(question.priority),
+                    "category": _value(question.category),
+                    "why_it_matters": why,
+                    "what_good_looks_like": question.what_good_looks_like,
+                    "claim_ids": list(question.claim_ids),
+                }
+                for index, (question, why) in enumerate(ranked)
+            ],
+            evidence_ledger=ledger,
         )
 
     def _validate_sections(
@@ -289,9 +370,137 @@ class ReportBuilder:
 # --------------------------------------------------------------- formatting ---
 def _format_section_plan() -> str:
     return "\n".join(
-        f"{index + 1}. **{item['heading']}** — {item['instruction']}"
+        f"{index + 1}. **{item['heading']}** (owns: {item.get('owns', '—')})\n   "
+        f"{item['instruction']}"
         for index, item in enumerate(SECTION_PLAN)
     )
+
+
+def _render_executive_summary(summary: Any) -> str:
+    """Lay the structured summary out as the one page an IC reads.
+
+    Rendered here rather than asked for as prose: the free-text version came
+    back as a single 280-word paragraph, which is complete and unusable.
+    """
+    if isinstance(summary, str):  # defensive: older payloads
+        return summary.strip()
+
+    lines = [summary.investment_thesis.strip(), ""]
+
+    if summary.key_strengths:
+        lines.append("**What is established**")
+        lines.append("")
+        lines.extend(f"- {item.strip()}" for item in summary.key_strengths)
+        lines.append("")
+    if summary.key_risks:
+        lines.append("**What is at risk or unresolved**")
+        lines.append("")
+        lines.extend(f"- {item.strip()}" for item in summary.key_risks)
+        lines.append("")
+    if summary.recommendation_line:
+        lines.extend([f"**Recommendation.** {summary.recommendation_line.strip()}", ""])
+    if summary.diligence_priorities:
+        lines.append("**Do these three things first**")
+        lines.append("")
+        lines.extend(
+            f"{index}. {item.strip()}"
+            for index, item in enumerate(summary.diligence_priorities, start=1)
+        )
+        lines.append("")
+
+    return "\n".join(lines).strip()
+
+
+def _format_section_routing(summaries: list[dict[str, Any]]) -> str:
+    """Tell each section which claims are its own.
+
+    Sections converge when they are all handed the same claim list and asked
+    to write something different about it. Routing the claims removes the
+    temptation: 'Open and Contested Claims' is given its shortlist, and every
+    other section is told to leave that shortlist alone.
+    """
+    contested = [
+        claim
+        for claim in summaries
+        if claim.get("contradicted")
+        or (
+            claim.get("is_thesis_critical")
+            and claim.get("evidence_state") in ("plausible_unverified", "company_reported")
+        )
+    ]
+    contested.sort(
+        key=lambda c: (bool(c.get("contradicted")), float(c.get("importance") or 0.0)),
+        reverse=True,
+    )
+    audit = [c for c in summaries if c.get("requires_audit")]
+
+    lines = [
+        "These are the ONLY claims the 'Open and Contested Claims' section may discuss "
+        "individually. Every other section must refer to them in aggregate, if at all.",
+        "",
+    ]
+    if contested:
+        for claim in contested[:12]:
+            kind = (
+                "CONTRADICTED"
+                if claim.get("contradicted")
+                else f"thesis-critical, {claim.get('evidence_state')}"
+            )
+            lines.append(f"  [{claim['ref']}] ({kind}) {truncate(claim['statement'], 140)}")
+    else:
+        lines.append(
+            "  (none — no claim is contradicted and no thesis-critical claim is unverified. "
+            "Say so in one line and keep that section very short.)"
+        )
+
+    if audit:
+        lines.extend(
+            [
+                "",
+                f"{len(audit)} claim(s) are company-reported metrics requiring audit. Refer to "
+                "them as company assertions awaiting audit, never as scientific weaknesses:",
+            ]
+        )
+        lines.extend(f"  [{c['ref']}] {truncate(c['statement'], 120)}" for c in audit[:8])
+    return "\n".join(lines)
+
+
+def _format_ledger(ledger: dict[str, Any], reasons: list[str], drivers: list[str]) -> str:
+    """The counted evidence facts, so the memo quotes rather than estimates."""
+    lines = [
+        "Counted from the evidence graph. Use these figures verbatim; do not recount.",
+        "",
+        f"  claims scored: {ledger['claims_scored']} "
+        f"(thesis-critical: {ledger['thesis_critical']})",
+        f"  externally verified: {ledger['verified']} "
+        f"| partially verified: {ledger['partially_verified']}",
+        f"  unverified but uncontradicted: {ledger['unverified']}",
+        f"  company-reported, awaiting audit: {ledger['company_reported']}",
+        f"  contradicted: {ledger['contradicted']} "
+        f"(thesis-critical: {ledger['thesis_contradicted']})",
+        f"  verification coverage: {ledger['verification_coverage']:.0%}",
+        "",
+        "Why assessment confidence is what it is (state these, do not invent others):",
+    ]
+    lines.extend(f"  - {reason}" for reason in reasons)
+    lines.extend(["", "The recommendation was driven by:"])
+    lines.extend(f"  - {driver}" for driver in drivers)
+    return "\n".join(lines)
+
+
+def _format_ranked_questions(ranked: list[tuple[Any, str]]) -> str:
+    if not ranked:
+        return "(no diligence questions were generated)"
+    lines = [
+        "Ranked by expected impact on the decision. The memo renders these separately; "
+        "use them to build the diligence programme rather than restating them.",
+        "",
+    ]
+    for index, (question, why) in enumerate(ranked, start=1):
+        lines.append(f"{index}. [{_value(question.priority)}] {question.question}")
+        lines.append(f"     impact: {why}")
+        lines.append(f"     good answer: {truncate(question.what_good_looks_like, 200)}")
+    return "\n".join(lines)
 
 
 def _format_scorecard(
