@@ -216,11 +216,15 @@ class Settings(BaseSettings):
         return self.storage_dir / "renders"
 
     @property
+    def metrics_dir(self) -> Path:
+        return self.storage_dir / "metrics"
+
+    @property
     def max_upload_bytes(self) -> int:
         return self.max_upload_mb * 1024 * 1024
 
     def ensure_directories(self) -> None:
-        for path in (self.storage_dir, self.uploads_dir, self.renders_dir):
+        for path in (self.storage_dir, self.uploads_dir, self.renders_dir, self.metrics_dir):
             path.mkdir(parents=True, exist_ok=True)
 
 

@@ -14,12 +14,18 @@ from app.analysis.scorecard import Scorecard
 from app.analysis.scoring import ClaimScore, ClaimScoringInput, OverallScore
 from app.analysis.verification import VerificationResult
 from app.core.enums import PipelineStage
+from app.core.instrumentation import MetricsCollector
 from app.evidence.retriever import RetrievalResult
 from app.extraction.claims import ClaimExtractionResult
 from app.extraction.entities import EntityExtractionResult
 from app.extraction.page_understanding import PageInput, PageResult
 from app.llm.schemas import ClaimVerdictOut, CompanyProfileOut
 from app.reporting.builder import BuiltReport, ReferenceTable
+
+
+def _make_metrics_collector(run_id: str, document_id: str) -> MetricsCollector:
+    """Factory function requires access to run_id/document_id; set in __post_init__."""
+    return MetricsCollector(run_id, document_id)
 
 
 @dataclass(slots=True)
@@ -34,6 +40,7 @@ class RunContext:
     run_id: str
     document_id: str
     started_at: dt.datetime
+    metrics_collector: MetricsCollector = field(init=False)
 
     # -- parse -------------------------------------------------------------
     pages: list[PageInput] = field(default_factory=list)
@@ -108,6 +115,12 @@ class RunContext:
     def warn(self, message: str) -> None:
         if message not in self.warnings:
             self.warnings.append(message)
+
+    def __post_init__(self) -> None:
+        """Initialize metrics collector after dataclass construction."""
+        object.__setattr__(
+            self, "metrics_collector", MetricsCollector(self.run_id, self.document_id)
+        )
 
     @property
     def pages_with_content(self) -> int:
