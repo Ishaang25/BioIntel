@@ -61,6 +61,7 @@ addopts = "-q --strict-markers"
 markers = [
     "integration: tests that exercise multiple layers end to end",
     "network: tests that require outbound network access (skipped by default)",
+    "benchmark: full-pipeline benchmark captures (run by `make benchmark`)",
 ]
 
 [tool.ruff]

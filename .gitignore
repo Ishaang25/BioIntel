@@ -24,6 +24,9 @@ npm-debug.log*
 .env
 .env.local
 storage/
+# The latest benchmark capture. benchmarks/baseline.json is the committed
+# reference; results.json is what the current working tree produced.
+benchmarks/results.json
 *.db
 *.db-wal
 *.db-shm

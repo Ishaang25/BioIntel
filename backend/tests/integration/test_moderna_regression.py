@@ -36,50 +36,11 @@ from app.evidence.europepmc import EuropePMCClient
 from app.evidence.openfda import OpenFDAClient
 from app.evidence.pubmed import PubMedClient
 from app.evidence.retriever import EvidenceRetriever
-from app.ingestion.pdf_parser import build_pdf
 from app.llm.client import LLMClient
 from app.llm.stub_provider import StubProvider
 from app.pipeline.orchestrator import AnalysisPipeline
 from app.services.documents import store_document
-
-# Statements taken from the real Moderna JPM 2025 deck, which produced the
-# 24.1/100 result. Each exercises a different failure mode.
-MODERNA_PAGES = [
-    """Moderna, Inc.
-Moderna was founded and built to use nature's information molecule, mRNA, to
-treat and prevent disease.""",
-    """2024 in review
-
-Approval of mRESVIA, our 2nd commercial product.
-mRESVIA U.S. FDA approval for ages 60+.
-Four positive Phase 3 readouts.
-Entering 2025 with two approved products in the U.S.""",
-    """Platform performance
-
-Moderna's rate of success with our platform technology is higher than industry
-standard. Our Phase 1 probability of success is 62% versus 35% for industry.""",
-    """Regulatory milestones
-
-Next-gen COVID is filed with a PDUFA date of May 30, 2025.
-Flu + COVID combo 50+ is filed.
-3 Biologics License Applications (BLAs) filed.""",
-    """Late-stage pipeline
-
-CMV vaccine mRNA-1647 is in Phase 3 efficacy testing.
-Seasonal flu mRNA-1010 is in Phase 3 efficacy testing.
-PA program mRNA-3927 is in a registrational efficacy study.""",
-    """Oncology and rare disease
-
-Adjuvant melanoma program mRNA-4157 is partnered and in development.
-Cystic fibrosis program mRNA-3692 / VX-522 is partnered with Vertex.
-Our platform is a revolutionary breakthrough in medicine.""",
-    """Outlook
-
-We will file additional programs in 2026.
-The total addressable market for respiratory vaccines exceeds $14 billion.
-Our objective is to become the leading mRNA medicines company.""",
-]
-
+from tests.fixtures.moderna_deck import moderna_pdf
 
 # --- external sources -------------------------------------------------------
 PUBMED_XML = """<?xml version="1.0"?>
@@ -176,7 +137,7 @@ def moderna_run(settings, monkeypatch) -> str:
     with session_scope() as session:
         document, _ = store_document(
             session,
-            data=build_pdf(MODERNA_PAGES, title="Moderna, Inc."),
+            data=moderna_pdf(),
             filename="moderna-jpm.pdf",
         )
         session.flush()
