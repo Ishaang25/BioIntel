@@ -103,10 +103,13 @@ def composite_page_text(page: PageInput, result: PageResult | None) -> str:
                 rows.append(f"- {point.label}: {point.value}{unit}{context}{estimated}")
             parts.append("[CHART VALUES]\n" + "\n".join(rows))
 
-        for table in understanding.tables:
-            if table.markdown.strip():
-                heading = f" — {table.title}" if table.title else ""
-                parts.append(f"[TABLE FROM IMAGE{heading}]\n{table.markdown.strip()}")
+        # `vision_table`, not `table`: the loop above binds `table` to the
+        # mechanically-extracted dicts from the text layer, and these are
+        # ExtractedTable objects from the vision pass.
+        for vision_table in understanding.tables:
+            if vision_table.markdown.strip():
+                heading = f" — {vision_table.title}" if vision_table.title else ""
+                parts.append(f"[TABLE FROM IMAGE{heading}]\n{vision_table.markdown.strip()}")
 
     return "\n\n".join(parts).strip()
 

@@ -101,6 +101,17 @@ class Worker:
     async def _run_job(self, job: dict[str, Any]) -> None:
         job_id = job["id"]
         run_id = job["payload"].get("run_id") or job.get("run_id")
+        if not run_id:
+            # Fail fast and permanently: without a run id there is nothing to
+            # execute, and retrying cannot supply one. Left unchecked this
+            # surfaced as an opaque failure deep inside the pipeline.
+            log.error("job.malformed", job_id=job_id, reason="no run_id in payload")
+            await asyncio.to_thread(
+                functools.partial(
+                    queue.mark_failed, job_id, "Job payload has no run_id", retry=False
+                )
+            )
+            return
         log.info("job.started", job_id=job_id, run_id=run_id, attempt=job["attempts"])
 
         cancelled = False

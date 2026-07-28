@@ -189,12 +189,15 @@ class EntityExtractionStage:
         model_count = len(resolved)
 
         backstop_added = self._apply_backstop(resolved, usable)
-        entities = list(resolved.values())
-        self._score_salience(entities, usable)
-        entities.sort(key=lambda e: e.salience, reverse=True)
+        # Deliberately not `entities`: that name holds the model's raw
+        # ExtractedEntity output earlier in this function, and reusing it for
+        # the resolved-and-merged list hid a type change in plain sight.
+        resolved_entities = list(resolved.values())
+        self._score_salience(resolved_entities, usable)
+        resolved_entities.sort(key=lambda e: e.salience, reverse=True)
 
         result = EntityExtractionResult(
-            entities=entities,
+            entities=resolved_entities,
             model_count=model_count,
             backstop_added=backstop_added,
             chunks=len(chunks),

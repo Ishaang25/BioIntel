@@ -31,6 +31,11 @@ def queued_run() -> tuple[str, str]:
     return run_id, job_id
 
 
+def _job_status(job_id: str) -> JobStatus:
+    with session_scope() as session:
+        return session.get(Job, job_id).status
+
+
 async def run_worker_until(worker: Worker, condition, *, timeout: float = 30.0) -> None:
     """Run the worker until ``condition()`` holds, then shut it down cleanly.
 
@@ -160,6 +165,21 @@ class TestWorkerLoop:
         await asyncio.sleep(0.2)
         worker.request_shutdown()
         await asyncio.wait_for(task, timeout=5.0)
+
+    async def test_job_without_a_run_id_fails_permanently(self, fake_pipeline):
+        """A malformed payload cannot be retried into working."""
+        job_id = queue.enqueue(queue.JOB_ANALYSE_DOCUMENT, {})
+        worker = Worker(concurrency=1)
+
+        await run_worker_until(
+            worker,
+            lambda: _job_status(job_id) is JobStatus.FAILED,
+        )
+
+        assert _job_status(job_id) is JobStatus.FAILED
+        # Never handed to the pipeline: it would have failed there with an
+        # error that named neither the job nor the real cause.
+        assert fake_pipeline.calls == []
 
     async def test_ignores_other_job_types(self, fake_pipeline):
         queue.enqueue("some_other_type", {"run_id": "run_x"})
