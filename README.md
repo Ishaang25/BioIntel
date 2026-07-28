@@ -224,8 +224,18 @@ frontend/
   src/lib/        typed API client, safe Markdown renderer
 ```
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the design rationale, the pipeline
-stages and the scoring model.
+## Documentation
+
+| Document | What it covers |
+|---|---|
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System shape, pipeline stages, anti-hallucination architecture, data model, degradation |
+| [docs/SCORING.md](docs/SCORING.md) | The ten dimensions, evidence states, aggregation, confidence, recommendation logic |
+| [docs/RETRIEVAL.md](docs/RETRIEVAL.md) | Sources, search strategy, ranking, registry verification, caching, failure handling |
+| [docs/REPORTING.md](docs/REPORTING.md) | Section ownership, traceability, driver bullets, question ranking, rendering |
+| [docs/EVALUATION.md](docs/EVALUATION.md) | Benchmark suite, the v1-beta baseline, regression policy, how to compare versions |
+| [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Every configurable parameter |
+| [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Running BioIntel in a real environment |
+| [docs/PRODUCTION_READINESS.md](docs/PRODUCTION_READINESS.md) | Risks, gaps and the roadmap |
 
 ---
 

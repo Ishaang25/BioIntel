@@ -237,7 +237,7 @@ BioIntel has reached feature-complete, production-quality status. The system is 
 - CONFIGURATION.md: All settings with tuning guides
 - EVALUATION.md: Benchmarking protocol + success criteria
 - DEPLOYMENT.md: Production runbook + troubleshooting
-- ARCHITECTURE.md: Technical deep dive (already exists)
+- docs/ARCHITECTURE.md: Technical deep dive
 
 ---
 
