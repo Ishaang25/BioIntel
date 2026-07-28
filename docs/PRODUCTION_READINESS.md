@@ -75,14 +75,20 @@ BioIntel has reached feature-complete, production-quality status. The system is 
 
 | Dimension | Status | Evidence |
 |-----------|--------|----------|
-| Linting | ✓ Clean | ruff check passes 100% |
-| Type hints | ✓ Comprehensive | mypy runs with no ignore-all |
-| Testing | ✓ 124 tests | 103 unit + 21 integration; all passing |
-| Test coverage | ✓ High | Core pipeline, models, stages all tested |
-| Regression suite | ✓ 38 tests | 17 BioNTech + 21 Moderna end-to-end |
-| Error handling | ✓ Defensive | Explicit error codes, recoverable degradation |
+| Linting | ✓ Clean | `ruff check .` passes repo-wide |
+| Formatting | ✓ Clean | `ruff format --check app tests` passes; also enforced by `make lint` |
+| Type checking | ⚠ Advisory | 13 errors remain, all SQLAlchemy stub limitations; not a CI gate |
+| Testing | ✓ 553 tests | 421 unit + 132 integration; all passing |
+| Benchmarks | ✓ 5 companies | Full-pipeline captures checked against a committed baseline |
+| Error handling | ✓ Defensive | Explicit error codes, recoverable degradation, no silent `except: pass` |
 | Logging | ✓ Structured | JSON logs with run_id, stage, metrics |
-| Documentation | ✓ Complete | Inline comments for non-obvious code; guides for operations |
+| Documentation | ✓ Complete | 8 documents under `docs/`; inline rationale for non-obvious code |
+
+**Type checking caveat.** `mypy` was silently non-functional until it was
+repaired: pinned to Python 3.11, it aborted on numpy's 3.12-syntax stubs
+before checking any project code. It now runs and is clean of real defects,
+but the residual stub errors mean it is not yet a gate. Making it one is a
+v1.1 item.
 
 ### Database ✓ WELL-DESIGNED
 
@@ -126,9 +132,19 @@ BioIntel has reached feature-complete, production-quality status. The system is 
 
 ### Uptime Characteristics
 
-- **Degraded mode** (no LLM): 99%+ uptime; minimal external dependencies
-- **Full mode** (with LLM): 95%+ uptime; dependent on OpenAI, PubMed availability
-- Expected recovery time: <5 minutes for transient failures
+BioIntel has not run in production, so there is no measured availability. What
+can be stated is the dependency structure:
+
+- **Degraded mode** (no LLM): depends only on the database and local storage.
+- **Full mode**: additionally depends on the model provider, PubMed/Europe PMC,
+  ClinicalTrials.gov and openFDA. Each is individually non-fatal — a source
+  outage degrades the run rather than failing it (see
+  [RETRIEVAL.md](RETRIEVAL.md)).
+- Transient failures are retried up to 3 times; abandoned jobs are reclaimed
+  after 5 minutes.
+
+Any availability target is an SLO to be set and then measured, not a property
+of the current build.
 
 ---
 
@@ -136,32 +152,61 @@ BioIntel has reached feature-complete, production-quality status. The system is 
 
 ### Baseline (v1-beta)
 
-| Metric | Value | Acceptable? |
-|--------|-------|-------------|
-| BioNTech 25-page deck | 34.6s | ✓ Yes |
-| Moderna 7-page deck | 91.9s | ✓ Yes |
-| Average cost (25-page) | $3-6 | ✓ Yes |
-| Runtime target | <15 min | ✓ Achieved |
-| Cost target | <$10 per deck | ✓ Achieved |
+Measured from `benchmarks/baseline.json` (`make benchmark`). **These are
+stub-provider runs**: no real model latency and no real spend. They measure
+BioIntel's own overhead and its token consumption, not end-to-end wall clock
+against a live provider.
 
-**Where time is spent** (25-page deck):
-- Retrieval: ~45% (literature search + ranking)
-- Extraction: ~25% (entity + claim extraction)
-- Assessment: ~20% (scoring + verification)
-- Reporting: ~10% (memo generation)
+| Company | Runtime | Prompt tok | Completion tok | Projected cost |
+|---|---|---|---|---|
+| BioNTech (50 pages) | 33.1s | 193,915 | 80,962 | $1.0520 |
+| CRISPR Therapeutics | 12.8s | 74,986 | 17,839 | $0.2721 |
+| Recursion | 5.7s | 40,026 | 10,682 | $0.1569 |
+| Beam Therapeutics | 5.5s | 54,012 | 13,232 | $0.1998 |
+| Moderna | 4.2s | 44,840 | 11,443 | $0.1705 |
+
+Projected cost prices the real token counts at the configured production model
+(`gpt-5`). A 50-page deck at roughly $1 of tokens is comfortably inside any
+sensible per-deck budget; the binding constraint in production will be model
+latency, which these numbers do not capture.
+
+**Where time is spent**, aggregated across all five benchmarks:
+
+| Stage | Share |
+|---|---|
+| Retrieval | 73.9% |
+| Assessment | 18.0% |
+| Parse | 2.9% |
+| Claims | 2.2% |
+| Entities | 1.7% |
+| Profile | 1.2% |
+| Adjudication, questions, report, page understanding | <0.2% combined |
+
+Retrieval dominates on every deck (60.4%–83.1%). Note this is with the stub
+provider, which removes model latency from the extraction and reasoning
+stages — under a live provider those stages grow substantially and retrieval's
+share falls. The honest reading: **retrieval is the dominant cost of
+BioIntel's own work**, and it is the right place to optimise first.
 
 ### Scaling Characteristics
 
-- Linear in page count (up to ~50 pages)
-- Linear in parallelism (concurrency limit: 12 LLM calls)
-- Retrieval concurrency is bottleneck (limited by rate limits)
+- Roughly linear in page count over the tested range (7–50 pages).
+- LLM concurrency limit 12; retrieval concurrency limit 4.
+- Retrieval concurrency is the tightest limit, and is set by source rate
+  limits rather than by local resources.
 
 ### Optimization Opportunities (Not Blocking)
 
-- Prompt caching: Save 30% of tokens on repeated queries
-- Batch retrieval: Combine queries, reduce round-trips
-- Faster model: Trade accuracy for speed on low-risk claims
-- Index caching: Store popular claim types' evidence offline
+Ordered by the measured breakdown above:
+
+- **Retrieval batching and caching** — the largest single lever. The 7-day
+  literature cache already exists; raising its hit rate across runs of similar
+  decks is the cheapest win available.
+- **Prompt caching** — cached input tokens bill at roughly a tenth of fresh
+  input on the configured model, and per-stage cached-token counts are now
+  instrumented, so the benefit is measurable rather than assumed.
+- **Cheaper model for low-risk claims** — trades accuracy for speed; would
+  need a benchmark re-capture to quantify the accuracy cost.
 
 ---
 
@@ -273,36 +318,39 @@ BioIntel has reached feature-complete, production-quality status. The system is 
 
 ## Test Coverage ✓ COMPREHENSIVE
 
-### Unit Tests (103)
+553 tests, all passing, plus 5 benchmark captures.
 
-| Module | Tests | Coverage |
-|--------|-------|----------|
-| Scoring | 18 | All dimensions, confidence, aggregation |
-| Verification | 14 | Regulatory lookup, phase extraction |
-| Analysis (rules) | 12 | Risk rules, deterministic findings |
-| Evidence (ranking) | 11 | Grade calculation, weight application |
-| Extraction (entities) | 10 | Lexicon matching, consolidation |
-| LLM (client) | 9 | Token counting, cost estimation, truncation recovery |
-| PDF (parsing) | 8 | Text extraction, OCR detection |
-| Text (normalization) | 7 | Character substitution, fuzzy matching |
+### Unit tests (421)
 
-### Integration Tests (21)
+Largest modules by test count: verification (42), evidence reasoning, report
+narrative, analysis rules, evidence ranking, LLM client, JSON repair, PDF
+parsing, text normalisation, and instrumentation (21).
+
+### Integration tests (132)
 
 | Scenario | Coverage |
 |----------|----------|
-| Full pipeline (empty deck) | Parse → understanding → extraction → retrieval → scoring → reporting |
+| Full pipeline | Parse → understanding → extraction → retrieval → scoring → reporting |
+| Metrics artefacts | `run_metrics.json` and `run_summary.md` written on every run; cost split reconciles to the total |
 | Partial failures (retrieval down) | Degradation mode; run completes without evidence |
-| Recovery (truncated LLM output) | Salvage partial results instead of re-sending oversized prompt |
-| Quote verification (mismatches) | Claims with unverifiable quotes are discarded |
-| Evidence adjudication | Model judgments + quote verification combined |
-| Scoring (various types) | Regulatory, trial, mechanism, market claims scored differently |
+| Recovery (truncated LLM output) | Salvage partial results instead of re-sending an oversized prompt |
+| Quote verification | Claims whose quotes are not in the document are discarded |
+| Worker behaviour | Claiming, retry, cancellation, shutdown, malformed payloads |
+| API surface | Upload, run lifecycle, artefact retrieval, export formats |
 
-### Regression Tests (38)
+### Company regression tests
 
-- **BioNTech** (17 tests): 25-page deck; chunking, parallelization, truncation recovery
-- **Moderna** (21 tests): 7-page deck; scoring correctness, corroboration model, IC scorecard
+- **BioNTech** (17 tests): chunking, parallelisation, truncation recovery.
+- **Moderna** (21 tests): scoring correctness, corroboration model, IC
+  scorecard — pins the specific fixes for the 24.1/100 defect.
 
-All pass; metrics baselined.
+These assert *behaviour* that aggregate metrics cannot express, which is why
+they exist alongside the benchmark suite rather than being replaced by it.
+
+### Benchmark suite (5)
+
+All five companies captured end to end and compared to
+`benchmarks/baseline.json`. See [EVALUATION.md](EVALUATION.md).
 
 ---
 
@@ -376,44 +424,93 @@ All pass; metrics baselined.
 
 ---
 
-## Success Criteria (All Met ✓)
+## Success Criteria
+
+Split by what has actually been measured. An unmeasured criterion is not a
+passing one.
+
+### Measured
 
 | Criterion | Target | v1-beta | Status |
-|-----------|--------|---------|--------|
-| Regression tests pass | 100% | 38/38 | ✓ PASS |
-| Regulatory accuracy | 98% | 100% (sample) | ✓ PASS |
-| Evidence false-positive | <5% | <3% (estimated) | ✓ PASS |
-| Runtime (25-page deck) | <15 min | 34.6s | ✓ PASS |
-| Cost per deck | <$10 | $3-6 | ✓ PASS |
-| Verification coverage | 30% | 43% (BioNTech) | ✓ PASS |
-| Code quality (lint) | 100% | 100% | ✓ PASS |
-| API latency (p99) | <5s | <2s | ✓ PASS |
-| Uptime (full mode) | 95% | Not yet tracked | — |
-| Uptime (degraded mode) | 99% | Not yet tracked | — |
+|---|---|---|---|
+| Test suite passes | 100% | 553/553 | ✓ PASS |
+| Benchmark captures pass | 5/5 | 5/5 vs committed baseline | ✓ PASS |
+| Company regression tests | 100% | 38/38 (BioNTech + Moderna) | ✓ PASS |
+| Lint | clean | `ruff check .` clean repo-wide | ✓ PASS |
+| Format | clean | `ruff format --check app tests` clean | ✓ PASS |
+| Verification coverage | ≥30% | 30.0%–87.5% across the suite | ✓ PASS |
+| Projected cost per deck | <$10 | $0.16–$1.05 | ✓ PASS |
+| Recommendation spread | >1 category | 3 categories across 5 decks | ✓ PASS |
+
+### Not yet measured
+
+These have no number behind them and must not be reported as met.
+
+| Criterion | Why not measured |
+|---|---|
+| Regulatory accuracy vs ground truth | No expert-labelled ground-truth set exists. Highest-value gap. |
+| Evidence false-positive rate | Same: requires labelled adjudications. |
+| End-to-end runtime, live provider | Benchmarks use the stub; no model latency captured. |
+| Actual cost per deck | Structurally $0 under the stub. Projection only. |
+| API latency (p50/p99) | No load testing performed. |
+| Uptime, either mode | Never run in production. |
+| Type checking as a gate | 13 SQLAlchemy stub errors must be suppressed first. |
 
 ---
 
-## Production Deployment Authorization
+## Estimated Production Readiness
 
-✓ **APPROVED FOR PRODUCTION**
+**Ready for supervised internal deployment. Not ready to be trusted
+unsupervised.**
 
-**Conditions:**
-1. Deploy with PostgreSQL backend (not SQLite)
-2. Enable API key authentication in production
-3. Set up monitoring dashboard (metrics, logs, errors)
-4. Create runbook for on-call support
-5. Brief end-users on limitations (abstract-only, keyword-based retrieval)
-6. Plan for v1.1 improvements (performance, benchmarks)
+That distinction is the whole assessment. The scientific reasoning is sound
+and now genuinely regression-guarded; what is missing is the evidence that it
+is *accurate*, and the operational history that would justify relying on it
+without review.
 
-**Recommended Timeline:**
-- Week 1: Deploy to staging
-- Week 2: Run through benchmark suite on staging
-- Week 3: Deploy to production (single instance)
-- Week 4: Monitor; expand to high-availability if needed
+| Area | Readiness |
+|---|---|
+| Scientific reasoning and scoring | High — well tested, well documented, benchmark-guarded |
+| Report generation | High — traceable, structurally pinned |
+| Instrumentation | Medium-high — works and is tested, but only recently |
+| Regression safety | Medium-high — 5 companies, deterministic, proven to catch drift |
+| Accuracy validation | **Low — no ground-truth set exists** |
+| Operational maturity | **Low — never run in production, no load testing, no SLOs** |
+
+### Blocking conditions for internal deployment
+
+1. PostgreSQL, not SQLite.
+2. API key authentication enabled.
+3. Metrics, logs and errors shipped somewhere a human looks.
+4. On-call runbook.
+5. **Every memo reviewed by a scientific advisor before it informs a
+   decision.** BioIntel produces a first draft; the limitations section of
+   each report is not boilerplate.
+6. Users briefed on the abstract-only and keyword-retrieval limitations.
+
+### Blocking conditions for unsupervised use
+
+None of these are met today:
+
+1. An expert-labelled ground-truth set, and a measured accuracy figure
+   against it.
+2. A measured false-positive rate for evidence adjudication.
+3. Runtime, cost and reliability measured against a live provider under
+   realistic load.
+4. Sustained production operation with reviewed output, long enough to
+   establish that the failure modes are the ones documented here.
+
+### A note on this document's history
+
+An earlier revision reported "APPROVED FOR PRODUCTION" with a success-criteria
+table in which several rows were estimates or had never been measured, and
+whose performance figures came from instrumentation that was not functioning.
+Those figures have been replaced with measured ones and the unmeasured
+criteria moved to an explicit "not yet measured" list. Readers of the earlier
+version should re-read the two tables above.
 
 ---
 
-**Approved By**: Engineering Lead  
-**Date**: 2026-07-28  
-**Version**: v1-beta  
-**Next Review**: 2026-10-28 (post-v1.1 release)
+**Version**: v1-beta
+**Assessed**: 2026-07-28
+**Next review**: after the accuracy ground-truth set exists (v1.1)
