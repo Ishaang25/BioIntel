@@ -1,0 +1,92 @@
+# ---------------------------------------------------------------------------
+# Render blueprint — BioIntel API.
+#
+#   1. Push this file to the repository.
+#   2. Render dashboard → New → Blueprint → select the repo.
+#   3. Fill in the values marked `sync: false` when prompted.
+#
+# Deploys the API only. The frontend is a Next.js SSR app and is happier on
+# Vercel; point its BIOINTEL_API_URL at this service's URL once it is live.
+#
+# The database is deliberately not declared here. Render's own free Postgres
+# expires, so `DATABASE_URL` is left as a prompted value — paste a connection
+# string from a provider whose free tier persists (Neon, Supabase). Any
+# `postgres://` or `postgresql://` URL is accepted; the application rewrites
+# the scheme onto the psycopg 3 driver it ships (see core/config.py).
+# ---------------------------------------------------------------------------
+
+services:
+  - type: web
+    name: biointel-api
+    runtime: docker
+    repo: https://github.com/Ishaang25/BioIntel.git
+    branch: perf/chunked-entity-extraction
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    plan: free
+    region: oregon
+    autoDeploy: true
+    healthCheckPath: /api/v1/ready
+
+    envVars:
+      # --- required --------------------------------------------------------
+      - key: ENVIRONMENT
+        value: production
+
+      # Startup aborts without these two; see the validator in core/config.py.
+      # `generateValue` has Render mint a strong secret and keep it.
+      - key: API_KEYS
+        generateValue: true
+      - key: SECRET_KEY
+        generateValue: true
+
+      - key: DATABASE_URL
+        sync: false
+
+      # Without a key the pipeline falls back to its deterministic offline
+      # analyser and every report is marked degraded. It still runs.
+      - key: OPENAI_API_KEY
+        sync: false
+
+      # --- deployment shape ------------------------------------------------
+      # One service, no worker: analyses run in a background thread of the API
+      # process and the request returns immediately. Switching this to `worker`
+      # requires a second service running `biointel-worker`.
+      - key: JOB_EXECUTION_MODE
+        value: inline
+
+      # The free plan has no persistent disk, so /data does not survive a
+      # restart. Reports are unaffected — they are read from the database — but
+      # the uploaded PDF and its page renders are lost, so re-analysing an older
+      # document will fail. Attach a disk on a paid instance to fix that.
+      - key: STORAGE_DIR
+        value: /data
+
+      # Nothing else runs migrations in a deployed environment: main.py only
+      # calls create_all() when ENVIRONMENT is local or test, and the free plan
+      # has no pre-deploy hook. The entrypoint applies them on boot instead.
+      - key: RUN_MIGRATIONS
+        value: "true"
+
+      # --- free-instance tuning --------------------------------------------
+      # Defaults (12 and 4) are sized for a real machine. On 512 MB, a dozen
+      # concurrent vision calls each holding a base64 page render is the most
+      # likely way to be OOM-killed mid-analysis. Raise these on a larger plan.
+      - key: LLM_CONCURRENCY
+        value: "4"
+      - key: RETRIEVAL_CONCURRENCY
+        value: "2"
+
+      # --- observability ---------------------------------------------------
+      - key: LOG_JSON
+        value: "true"
+      - key: LOG_LEVEL
+        value: INFO
+
+      # --- optional: raises third-party rate limits ------------------------
+      # NCBI: 3 → 10 requests/second. Free from ncbi.nlm.nih.gov/account.
+      - key: NCBI_API_KEY
+        sync: false
+      # Sent in the User-Agent; NCBI requires a contact address for E-utilities.
+      - key: NCBI_TOOL_EMAIL
+        sync: false

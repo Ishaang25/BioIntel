@@ -28,7 +28,8 @@ FROM python:3.12-slim AS runtime
 ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    STORAGE_DIR=/data
+    STORAGE_DIR=/data \
+    PORT=8000
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends curl \
@@ -43,12 +44,18 @@ WORKDIR /app
 COPY --chown=biointel:biointel alembic.ini ./
 COPY --chown=biointel:biointel alembic ./alembic
 COPY --chown=biointel:biointel app ./app
+# --chmod so the bit survives a checkout on a filesystem without one (Windows).
+COPY --chown=biointel:biointel --chmod=0755 entrypoint.sh ./entrypoint.sh
 
 USER biointel
+# Documents the default. Platforms that assign a port inject $PORT, which the
+# command below binds instead -- Render, Railway and Koyeb all do this, and a
+# hardcoded port means the platform's health check never connects.
 EXPOSE 8000
 VOLUME ["/data"]
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD curl -fsS http://127.0.0.1:8000/api/v1/ready || exit 1
+  CMD curl -fsS "http://127.0.0.1:${PORT:-8000}/api/v1/ready" || exit 1
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers"]
+ENTRYPOINT ["/app/entrypoint.sh"]
+CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --proxy-headers"]

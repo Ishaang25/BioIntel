@@ -19,6 +19,29 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 
 
+def normalise_database_url(url: str) -> str:
+    """Map the URL forms hosting providers emit onto the driver we install.
+
+    Managed Postgres -- Neon, Render, Supabase, Heroku -- hands out a
+    ``postgres://`` URL. SQLAlchemy 2 removed that alias and rejects it
+    outright. The ``postgresql://`` form is accepted but resolves to psycopg2,
+    which is not in this project's dependency set (``.[postgres]`` installs
+    psycopg 3), so it fails at connect time with a missing-driver error.
+
+    Both are rewritten to the driver actually present. A URL that names its
+    driver explicitly is left alone: overriding a deliberate choice would hide
+    the real problem rather than fix it.
+    """
+    if not url:
+        return url
+    scheme, separator, rest = url.partition("://")
+    if not separator:
+        return url
+    if scheme.lower() in {"postgres", "postgresql"}:
+        return f"postgresql+psycopg://{rest}"
+    return url
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=(REPO_ROOT / ".env", BACKEND_ROOT / ".env"),
@@ -174,6 +197,11 @@ class Settings(BaseSettings):
             return Path(os.path.expandvars(v)).expanduser()
         return v
 
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def _normalise_database_url(cls, v: object) -> object:
+        return normalise_database_url(v) if isinstance(v, str) else v
+
     @model_validator(mode="after")
     def _defaults_and_invariants(self) -> Settings:
         if not self.database_url:
@@ -184,10 +212,21 @@ class Settings(BaseSettings):
             # runnable without credentials; loudly flagged at startup.
             object.__setattr__(self, "llm_provider", "stub")
         if self.environment == "production":
+            # These abort startup, so the message is the only diagnostic a
+            # platform log will carry. Say what to do, not just what is wrong.
             if not self.api_keys:
-                raise ValueError("API_KEYS must be set in production")
+                raise ValueError(
+                    "API_KEYS must be set when ENVIRONMENT=production; the API would "
+                    "otherwise accept unauthenticated requests. Set it to one or more "
+                    "comma-separated secrets, e.g. "
+                    'python -c "import secrets; print(secrets.token_urlsafe(32))"'
+                )
             if self.secret_key == "dev-insecure-secret-change-me":
-                raise ValueError("SECRET_KEY must be changed in production")
+                raise ValueError(
+                    "SECRET_KEY is still the built-in development value; set it to a "
+                    "generated secret when ENVIRONMENT=production, e.g. "
+                    'python -c "import secrets; print(secrets.token_urlsafe(48))"'
+                )
         return self
 
     # ------------------------------------------------------------ helpers ---
