@@ -25,18 +25,18 @@ export function StartRunButton({
       const run = await api.createRun(documentId, hasActiveRun);
       router.push(`/runs/${run.id}`);
       router.refresh();
-    } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : 'Could not start the analysis.');
+    } catch (cause) {
+      setError(cause instanceof ApiRequestError ? cause.message : 'Could not start the analysis.');
       setBusy(false);
     }
   }
 
   return (
     <div className="flex flex-col items-end gap-1">
-      <button className="btn-primary" onClick={start} disabled={busy}>
+      <button className="btn btn-primary" onClick={start} disabled={busy}>
         {busy ? 'Starting…' : hasActiveRun ? 'Re-analyse' : 'Analyse'}
       </button>
-      {error && <span className="text-xs text-red-600 dark:text-red-400">{error}</span>}
+      {error && <span className="text-2xs text-crit">{error}</span>}
     </div>
   );
 }

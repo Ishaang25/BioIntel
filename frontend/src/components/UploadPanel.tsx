@@ -4,6 +4,7 @@ import { useRouter } from 'next/navigation';
 import { useCallback, useRef, useState } from 'react';
 
 import { api, ApiRequestError } from '@/lib/api';
+import { Card, cx } from '@/components/ui';
 
 const MAX_MB = 50;
 
@@ -24,7 +25,9 @@ export function UploadPanel() {
       return;
     }
     if (candidate.size > MAX_MB * 1024 * 1024) {
-      setError(`That file is ${(candidate.size / 1_048_576).toFixed(1)} MB; the limit is ${MAX_MB} MB.`);
+      setError(
+        `That file is ${(candidate.size / 1_048_576).toFixed(1)} MB; the limit is ${MAX_MB} MB.`,
+      );
       return;
     }
     setFile(candidate);
@@ -36,16 +39,13 @@ export function UploadPanel() {
     setError(null);
     try {
       const result = await api.uploadDocument(file, notes, true);
-      if (result.run) {
-        router.push(`/runs/${result.run.id}`);
-      } else {
-        router.push(`/documents/${result.document.id}`);
-      }
+      if (result.run) router.push(`/runs/${result.run.id}`);
+      else router.push(`/documents/${result.document.id}`);
       router.refresh();
-    } catch (err) {
+    } catch (cause) {
       setError(
-        err instanceof ApiRequestError
-          ? err.message
+        cause instanceof ApiRequestError
+          ? cause.message
           : 'Upload failed. Check that the backend is running.',
       );
       setBusy(false);
@@ -53,9 +53,9 @@ export function UploadPanel() {
   }
 
   return (
-    <div className="card">
-      <h2 className="text-base font-semibold">Analyse a pitch deck</h2>
-      <p className="mt-1 text-sm text-ink-500">
+    <Card className="p-6">
+      <h2 className="text-[15px] font-semibold tracking-[-0.01em]">Analyse a pitch deck</h2>
+      <p className="mt-1.5 text-[13px] leading-relaxed text-fg-2">
         Upload a biotech pitch deck as a PDF. Scanned decks are read visually; charts and tables are
         interpreted alongside the text.
       </p>
@@ -73,16 +73,20 @@ export function UploadPanel() {
         }}
         onClick={() => inputRef.current?.click()}
         onKeyDown={(event) => {
-          if (event.key === 'Enter' || event.key === ' ') inputRef.current?.click();
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            inputRef.current?.click();
+          }
         }}
         role="button"
         tabIndex={0}
         aria-label="Choose a PDF to analyse"
-        className={`mt-4 cursor-pointer rounded-lg border-2 border-dashed px-6 py-10 text-center transition-colors ${
+        className={cx(
+          'mt-5 cursor-pointer rounded-card border border-dashed px-6 py-12 text-center transition-colors',
           dragging
-            ? 'border-ink-900 bg-ink-100 dark:border-ink-100 dark:bg-ink-800'
-            : 'border-ink-300 hover:border-ink-400 dark:border-ink-700 dark:hover:border-ink-600'
-        }`}
+            ? 'border-fg bg-subtle'
+            : 'border-line-strong hover:border-fg-3 hover:bg-subtle/60',
+        )}
       >
         <input
           ref={inputRef}
@@ -92,17 +96,19 @@ export function UploadPanel() {
           onChange={(event) => accept(event.target.files?.[0])}
         />
         {file ? (
-          <div>
-            <div className="text-sm font-medium">{file.name}</div>
-            <div className="mt-1 text-xs text-ink-500">
+          <>
+            <div className="text-[13.5px] font-medium text-fg">{file.name}</div>
+            <div className="num mt-1 text-2xs text-fg-3">
               {(file.size / 1_048_576).toFixed(1)} MB — click to choose a different file
             </div>
-          </div>
+          </>
         ) : (
-          <div>
-            <div className="text-sm font-medium">Drop a PDF here, or click to browse</div>
-            <div className="mt-1 text-xs text-ink-500">Up to {MAX_MB} MB, digital or scanned</div>
-          </div>
+          <>
+            <div className="text-[13.5px] font-medium text-fg">
+              Drop a PDF here, or click to browse
+            </div>
+            <div className="mt-1 text-2xs text-fg-3">Up to {MAX_MB} MB, digital or scanned</div>
+          </>
         )}
       </div>
 
@@ -113,28 +119,26 @@ export function UploadPanel() {
           onChange={(event) => setNotes(event.target.value)}
           rows={2}
           placeholder="e.g. Series A, introduced by a co-investor; focus on the translational story."
-          className="mt-1 w-full rounded-md border border-ink-300 bg-white px-3 py-2 text-sm
-                     placeholder:text-ink-400 focus:border-ink-500 focus:outline-none
-                     dark:border-ink-700 dark:bg-ink-900"
+          className="field mt-1.5 resize-y"
         />
       </label>
 
       {error && (
         <div
           role="alert"
-          className="mt-3 rounded-md border border-red-500/40 bg-red-500/5 px-3 py-2 text-sm text-red-700 dark:text-red-400"
+          className="mt-3 rounded-lg border border-crit/25 bg-crit/10 px-3.5 py-2.5 text-[13px] text-crit"
         >
           {error}
         </div>
       )}
 
-      <div className="mt-4 flex items-center gap-3">
-        <button className="btn-primary" onClick={submit} disabled={!file || busy}>
+      <div className="mt-5 flex items-center gap-2">
+        <button className="btn btn-primary" onClick={submit} disabled={!file || busy}>
           {busy ? 'Uploading…' : 'Upload and analyse'}
         </button>
         {file && !busy && (
           <button
-            className="btn-secondary"
+            className="btn btn-ghost"
             onClick={() => {
               setFile(null);
               setError(null);
@@ -144,6 +148,6 @@ export function UploadPanel() {
           </button>
         )}
       </div>
-    </div>
+    </Card>
   );
 }

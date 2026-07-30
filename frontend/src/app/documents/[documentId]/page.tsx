@@ -2,26 +2,19 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 
 import { StartRunButton } from '@/components/StartRunButton';
-import {
-  Chip,
-  EmptyState,
-  PageHeader,
-  Stat,
-  formatBytes,
-  formatDate,
-  formatDuration,
-} from '@/components/ui';
+import { Badge, Card, EmptyState, MetricCard, PageHeader } from '@/components/ui';
 import { api, ApiRequestError } from '@/lib/api';
-import type { DocumentDetail, Run } from '@/lib/types';
+import { formatBytes, formatDate, formatDuration, humanise } from '@/lib/format';
+import type { DocumentDetail, Run, RunStatus } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
 
-const STATUS_STYLES: Record<string, string> = {
-  succeeded: 'text-emerald-600 dark:text-emerald-400',
-  failed: 'text-red-600 dark:text-red-400',
-  running: 'text-sky-600 dark:text-sky-400',
-  pending: 'text-ink-500',
-  cancelled: 'text-ink-500',
+const STATUS_TONE: Record<RunStatus, 'pos' | 'crit' | 'info' | 'neutral'> = {
+  succeeded: 'pos',
+  failed: 'crit',
+  running: 'info',
+  pending: 'neutral',
+  cancelled: 'neutral',
 };
 
 export default async function DocumentPage({
@@ -42,30 +35,31 @@ export default async function DocumentPage({
   const runs: Run[] = (await api.listRuns(50)).items.filter(
     (run) => run.document_id === documentId,
   );
+  const active = runs.some((run) => run.status === 'pending' || run.status === 'running');
 
   return (
-    <div className="space-y-6">
+    <div className="page space-y-6">
       <PageHeader
         title={document.filename}
         back={{ href: '/', label: 'All decks' }}
         subtitle={
-          <span className="flex flex-wrap items-center gap-2">
-            <span>{document.page_count} pages</span>
-            <span>·</span>
-            <span>{formatBytes(document.size_bytes)}</span>
-            <span>·</span>
+          <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
+            <span className="num">{document.page_count} pages</span>
+            <span aria-hidden>·</span>
+            <span className="num">{formatBytes(document.size_bytes)}</span>
+            <span aria-hidden>·</span>
             <span>uploaded {formatDate(document.created_at)}</span>
-            {document.requires_ocr && <Chip>scanned</Chip>}
+            {document.requires_ocr && <Badge>Scanned</Badge>}
           </span>
         }
-        actions={<StartRunButton documentId={documentId} hasActiveRun={runs.some((r) => r.status === 'pending' || r.status === 'running')} />}
+        actions={<StartRunButton documentId={documentId} hasActiveRun={active} />}
       />
 
-      <div className="card grid grid-cols-2 gap-6 sm:grid-cols-4">
-        <Stat label="Pages" value={document.page_count} />
-        <Stat label="Analyses" value={document.run_count} />
-        <Stat label="Size" value={formatBytes(document.size_bytes)} />
-        <Stat
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <MetricCard label="Pages" value={document.page_count} />
+        <MetricCard label="Analyses" value={document.run_count} />
+        <MetricCard label="Size" value={formatBytes(document.size_bytes)} />
+        <MetricCard
           label="Text layer"
           value={document.requires_ocr ? 'Partial' : 'Complete'}
           hint={document.requires_ocr ? 'read visually' : 'digital PDF'}
@@ -73,51 +67,49 @@ export default async function DocumentPage({
       </div>
 
       {document.notes && (
-        <div className="card">
+        <Card className="p-5">
           <h2 className="label">Analyst context</h2>
-          <p className="mt-1.5 text-sm">{document.notes}</p>
-        </div>
+          <p className="mt-2 text-[13.5px] leading-relaxed text-fg-2">{document.notes}</p>
+        </Card>
       )}
 
       <section>
-        <h2 className="mb-3 text-base font-semibold">Analyses</h2>
+        <h2 className="mb-3 text-[15px] font-semibold tracking-[-0.01em]">Analyses</h2>
         {runs.length === 0 ? (
           <EmptyState
             title="No analyses yet"
             description="Start an analysis to extract this deck's scientific claims and check them against the literature."
           />
         ) : (
-          <div className="overflow-hidden rounded-lg border border-ink-200 dark:border-ink-800">
-            <table className="w-full text-sm">
-              <thead className="bg-ink-100 text-left dark:bg-ink-900">
+          <Card className="overflow-hidden">
+            <table className="data-table">
+              <thead>
                 <tr>
-                  <th className="px-4 py-2.5 font-medium">Started</th>
-                  <th className="px-4 py-2.5 font-medium">Status</th>
-                  <th className="px-4 py-2.5 font-medium">Stage</th>
-                  <th className="px-4 py-2.5 font-medium">Duration</th>
-                  <th className="px-4 py-2.5" />
+                  <th className="w-[190px]">Started</th>
+                  <th className="w-[140px]">Status</th>
+                  <th>Stage</th>
+                  <th className="w-[110px]">Duration</th>
+                  <th className="w-[90px]" />
                 </tr>
               </thead>
-              <tbody className="divide-y divide-ink-200 bg-white dark:divide-ink-800 dark:bg-ink-950">
+              <tbody>
                 {runs.map((run) => (
-                  <tr key={run.id} className="hover:bg-ink-50 dark:hover:bg-ink-900">
-                    <td className="px-4 py-3 text-ink-600 dark:text-ink-400">
-                      {formatDate(run.created_at)}
+                  <tr key={run.id}>
+                    <td className="text-fg-2">{formatDate(run.created_at)}</td>
+                    <td>
+                      <Badge tone={STATUS_TONE[run.status]}>
+                        {humanise(run.status)}
+                        {run.status === 'running' && (
+                          <span className="num">{Math.round(run.progress * 100)}%</span>
+                        )}
+                      </Badge>
                     </td>
-                    <td className={`px-4 py-3 font-medium ${STATUS_STYLES[run.status] ?? ''}`}>
-                      {run.status}
-                      {run.status === 'running' && ` (${Math.round(run.progress * 100)}%)`}
-                    </td>
-                    <td className="px-4 py-3 text-ink-600 dark:text-ink-400">
-                      {run.current_stage?.replace(/_/g, ' ') ?? '—'}
-                    </td>
-                    <td className="px-4 py-3 tabular-nums text-ink-600 dark:text-ink-400">
-                      {formatDuration(run.duration_ms)}
-                    </td>
-                    <td className="px-4 py-3 text-right">
+                    <td className="text-fg-2">{humanise(run.current_stage) || '—'}</td>
+                    <td className="num text-fg-2">{formatDuration(run.duration_ms)}</td>
+                    <td className="text-right">
                       <Link
                         href={`/runs/${run.id}`}
-                        className="text-ink-500 hover:text-ink-900 dark:hover:text-ink-100"
+                        className="text-fg-3 transition-colors hover:text-fg"
                       >
                         Open →
                       </Link>
@@ -126,7 +118,7 @@ export default async function DocumentPage({
                 ))}
               </tbody>
             </table>
-          </div>
+          </Card>
         )}
       </section>
     </div>

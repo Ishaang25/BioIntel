@@ -2,105 +2,298 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ------------------------------------------------------------------ theme --- */
+
 @layer base {
   :root {
     color-scheme: light dark;
+
+    --c-canvas: 247 248 249;
+    --c-panel: 255 255 255;
+    --c-subtle: 245 246 248;
+    --c-line: 227 230 234;
+    --c-line-strong: 205 210 217;
+    --c-fg: 15 18 23;
+    --c-fg-2: 82 90 101;
+    --c-fg-3: 129 138 149;
+    --c-accent: 22 26 33;
+    --c-pos: 13 116 76;
+    --c-warn: 154 102 0;
+    --c-alert: 183 74 21;
+    --c-crit: 176 42 34;
+    --c-info: 29 90 158;
+    --c-shadow: 15 23 42;
+
+    --c-band-strong: 13 116 76;
+    --c-band-moderate: 29 90 158;
+    --c-band-limited: 154 102 0;
+    --c-band-weak: 183 74 21;
+    --c-band-unsupported: 176 42 34;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --c-canvas: 10 12 15;
+      --c-panel: 17 20 25;
+      --c-subtle: 23 27 33;
+      --c-line: 33 38 46;
+      --c-line-strong: 52 59 69;
+      --c-fg: 232 235 239;
+      --c-fg-2: 156 165 176;
+      --c-fg-3: 116 125 137;
+      --c-accent: 236 239 243;
+      --c-pos: 68 187 133;
+      --c-warn: 224 168 62;
+      --c-alert: 232 141 89;
+      --c-crit: 240 137 128;
+      --c-info: 122 172 234;
+      --c-shadow: 0 0 0;
+
+      --c-band-strong: 68 187 133;
+      --c-band-moderate: 122 172 234;
+      --c-band-limited: 224 168 62;
+      --c-band-weak: 232 141 89;
+      --c-band-unsupported: 240 137 128;
+    }
   }
 
   html {
     -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    scroll-behavior: smooth;
   }
 
-  body {
-    @apply bg-ink-50 text-ink-900 antialiased;
-  }
-
-  @media (prefers-color-scheme: dark) {
-    body {
-      @apply bg-ink-950 text-ink-100;
+  @media (prefers-reduced-motion: reduce) {
+    html {
+      scroll-behavior: auto;
     }
   }
 
+  body {
+    @apply bg-canvas text-fg antialiased;
+    font-feature-settings: 'cv05' 1, 'ss01' 1;
+  }
+
   ::selection {
-    @apply bg-ink-900 text-ink-50;
+    @apply bg-fg/90 text-panel;
+  }
+
+  /* Slim, unobtrusive scrollbars inside dense panels. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(var(--c-line-strong)) transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  *::-webkit-scrollbar-thumb {
+    @apply rounded-full border-[3px] border-solid border-transparent bg-line-strong bg-clip-content;
+  }
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  :focus-visible {
+    @apply outline-none ring-2 ring-fg/25 ring-offset-2 ring-offset-canvas;
+  }
+
+  /* The only motion in the product: layers entering. Nothing loops. */
+  @keyframes fadeIn {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+
+  @keyframes slideIn {
+    from {
+      transform: translateX(16px);
+      opacity: 0;
+    }
+    to {
+      transform: translateX(0);
+      opacity: 1;
+    }
   }
 }
 
+/* ------------------------------------------------------------- components --- */
+
 @layer components {
+  .page {
+    @apply mx-auto w-full max-w-6xl px-6 py-9;
+  }
+
   .card {
-    @apply rounded-lg border border-ink-200 bg-white p-5 dark:border-ink-800 dark:bg-ink-900;
+    @apply rounded-card border border-line bg-panel shadow-card;
+  }
+
+  .data-table {
+    @apply w-full text-[13px];
+  }
+  .data-table thead th {
+    @apply label border-b border-line px-4 py-2.5 text-left;
+  }
+  .data-table tbody td {
+    @apply border-b border-line px-4 py-3 align-middle;
+  }
+  .data-table tbody tr:last-child td {
+    @apply border-b-0;
+  }
+  .data-table tbody tr {
+    @apply transition-colors hover:bg-subtle;
+  }
+
+  .card-p {
+    @apply card p-5;
   }
 
   .label {
-    @apply text-[11px] font-semibold uppercase tracking-wider text-ink-500;
+    @apply text-2xs font-semibold uppercase tracking-[0.07em] text-fg-3;
   }
 
+  .num {
+    @apply tabular-nums [font-variant-numeric:tabular-nums];
+  }
+
+  /* ------------------------------------------------------------ buttons --- */
+
   .btn {
-    @apply inline-flex items-center justify-center gap-2 rounded-md px-4 py-2 text-sm
-           font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50;
+    @apply inline-flex select-none items-center justify-center gap-1.5 whitespace-nowrap rounded-lg
+           px-3.5 py-2 text-sm font-medium transition-colors
+           disabled:pointer-events-none disabled:opacity-45;
+  }
+
+  .btn-sm {
+    @apply gap-1 rounded-md px-2.5 py-1.5 text-[13px];
   }
 
   .btn-primary {
-    @apply btn bg-ink-900 text-white hover:bg-ink-800
-           dark:bg-ink-100 dark:text-ink-900 dark:hover:bg-white;
+    @apply btn bg-accent text-panel hover:bg-accent/90;
   }
 
   .btn-secondary {
-    @apply btn border border-ink-300 bg-white text-ink-700 hover:bg-ink-100
-           dark:border-ink-700 dark:bg-ink-900 dark:text-ink-200 dark:hover:bg-ink-800;
+    @apply btn border border-line bg-panel text-fg hover:border-line-strong hover:bg-subtle;
   }
+
+  .btn-ghost {
+    @apply btn text-fg-2 hover:bg-subtle hover:text-fg;
+  }
+
+  /* ------------------------------------------------------------- inputs --- */
+
+  .field {
+    @apply w-full rounded-lg border border-line bg-panel px-3 py-2 text-sm text-fg
+           placeholder:text-fg-3 focus:border-line-strong focus:outline-none focus:ring-2
+           focus:ring-fg/10;
+  }
+
+  .field-sm {
+    @apply field rounded-md px-2.5 py-1.5 text-[13px];
+  }
+
+  select.field-sm {
+    @apply cursor-pointer appearance-none bg-[length:9px] bg-[right_0.6rem_center] bg-no-repeat pr-7;
+    background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3e%3cpath fill='none' stroke='%23818a95' stroke-width='1.5' d='M1 1l4 4 4-4'/%3e%3c/svg%3e");
+  }
+
+  /* -------------------------------------------------------------- chips --- */
 
   .chip {
-    @apply inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium;
+    @apply inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-2xs font-medium
+           leading-4 whitespace-nowrap;
   }
 
-  /* Rendered report markdown */
-  .prose-report {
-    @apply text-[15px] leading-relaxed text-ink-800 dark:text-ink-200;
+  .chip-neutral {
+    @apply chip border-line bg-subtle text-fg-2;
   }
-  .prose-report h1 {
-    @apply mb-4 mt-0 text-2xl font-semibold tracking-tight text-ink-900 dark:text-ink-50;
+
+  /* --------------------------------------------------------------- prose --- */
+
+  /*
+   * Report narrative. Deliberately not "markdown-looking": no monospace, no
+   * hard rules, generous measure, and headings that sit inside the card's
+   * typographic scale rather than shouting over it.
+   */
+  .prose-memo {
+    @apply text-[14.5px] leading-[1.7] text-fg-2;
   }
-  .prose-report h2 {
-    @apply mb-2 mt-8 border-b border-ink-200 pb-1 text-lg font-semibold
-           tracking-tight text-ink-900 dark:border-ink-800 dark:text-ink-50;
+  .prose-memo > * + * {
+    @apply mt-3.5;
   }
-  .prose-report h3 {
-    @apply mb-2 mt-6 text-base font-semibold text-ink-900 dark:text-ink-100;
+  .prose-memo h2,
+  .prose-memo h3,
+  .prose-memo h4 {
+    @apply mt-6 text-[13px] font-semibold uppercase tracking-[0.06em] text-fg-3;
   }
-  .prose-report p {
-    @apply my-3;
+  .prose-memo strong {
+    @apply font-semibold text-fg;
   }
-  .prose-report ul {
-    @apply my-3 list-disc space-y-1 pl-6;
+  .prose-memo em {
+    @apply italic;
   }
-  .prose-report ol {
-    @apply my-3 list-decimal space-y-1 pl-6;
+  .prose-memo ul,
+  .prose-memo ol {
+    @apply space-y-1.5 pl-5;
   }
-  .prose-report blockquote {
-    @apply my-4 border-l-4 border-ink-300 bg-ink-100 px-4 py-2 text-sm
-           dark:border-ink-700 dark:bg-ink-800/60;
+  .prose-memo ul {
+    @apply list-disc marker:text-fg-3;
   }
-  .prose-report table {
-    @apply my-4 w-full border-collapse text-sm;
+  .prose-memo ol {
+    @apply list-decimal marker:text-fg-3 marker:num;
   }
-  .prose-report th,
-  .prose-report td {
-    @apply border border-ink-200 px-3 py-2 text-left align-top dark:border-ink-800;
+  .prose-memo li::marker {
+    @apply text-[13px];
   }
-  .prose-report th {
-    @apply bg-ink-100 font-semibold dark:bg-ink-800;
+  .prose-memo blockquote {
+    @apply border-l-2 border-line-strong pl-4 text-fg-2;
   }
-  .prose-report code {
-    @apply rounded bg-ink-100 px-1 py-0.5 font-mono text-[0.85em] dark:bg-ink-800;
+  .prose-memo code {
+    @apply rounded border border-line bg-subtle px-1 py-px font-mono text-[0.85em];
   }
-  .prose-report a {
-    @apply underline underline-offset-2;
+  .prose-memo a {
+    @apply text-fg underline decoration-line-strong underline-offset-2 hover:decoration-fg;
   }
-  .prose-report hr {
-    @apply my-8 border-ink-200 dark:border-ink-800;
+  .prose-memo hr {
+    @apply my-6 border-line;
   }
-  .prose-report strong {
-    @apply font-semibold text-ink-900 dark:text-ink-50;
+  .prose-memo table {
+    @apply block w-full max-w-full overflow-x-auto border-collapse text-[13px];
+  }
+  .prose-memo th,
+  .prose-memo td {
+    @apply border-b border-line px-3 py-2 text-left align-top;
+  }
+  .prose-memo th {
+    @apply label border-b-line-strong pb-1.5;
+  }
+
+  /* Inline citation tokens produced by `linkCitations`. */
+  .cite {
+    @apply mx-px inline-flex cursor-pointer items-center rounded border border-line bg-subtle
+           px-1 align-baseline font-mono text-[10.5px] font-medium leading-[1.35] text-fg-2
+           transition-colors hover:border-line-strong hover:bg-panel hover:text-fg;
+  }
+
+  .cite-dangling {
+    @apply cursor-help border-dashed border-line bg-transparent text-fg-3
+           hover:border-line hover:bg-transparent hover:text-fg-3;
+  }
+}
+
+@layer utilities {
+  /* Clears the sticky report chrome: title bar plus the tablet section strip,
+     which collapses into the rail at the `lg` breakpoint. */
+  .scroll-anchor {
+    scroll-margin-top: 8rem;
+  }
+
+  @media (min-width: 1024px) {
+    .scroll-anchor {
+      scroll-margin-top: 5rem;
+    }
   }
 }

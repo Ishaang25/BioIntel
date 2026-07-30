@@ -2,10 +2,34 @@ import Link from 'next/link';
 
 import { UploadPanel } from '@/components/UploadPanel';
 import { api, ApiRequestError } from '@/lib/api';
-import { Callout, Chip, EmptyState, PageHeader, formatBytes, formatDate } from '@/components/ui';
+import { Badge, Callout, Card, EmptyState, PageHeader } from '@/components/ui';
+import { formatBytes, formatDate } from '@/lib/format';
 import type { DocumentSummary, Health } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
+
+const CAPABILITIES: Array<[string, string]> = [
+  [
+    'Claims with provenance',
+    'Every extracted claim carries the verbatim quote and page it came from, verified against the document.',
+  ],
+  [
+    'Literature adjudication',
+    'Each claim is searched against PubMed, Europe PMC and ClinicalTrials.gov, and each record is judged as supporting, contradicting or unrelated.',
+  ],
+  [
+    'Credibility scoring',
+    'A deterministic, fully broken-down score combines the evidence tier the deck offers with what the literature actually shows.',
+  ],
+  [
+    'Diligence questions',
+    'The specific technical questions to put to the company, with what a good answer looks like.',
+  ],
+  [
+    'IC memo',
+    'A cited, exportable first-draft memo separating what the company claims, what the evidence shows, and what BioIntel infers.',
+  ],
+];
 
 export default async function HomePage() {
   let documents: DocumentSummary[] = [];
@@ -22,21 +46,24 @@ export default async function HomePage() {
   }
 
   return (
-    <div className="space-y-8">
+    <div className="page space-y-8">
       <PageHeader
         title="Scientific due diligence"
         subtitle="Upload a biotech pitch deck. BioIntel extracts every scientific claim, checks it against published literature and trial registries, and drafts an Investment Committee memo."
       />
 
       {apiDown && (
-        <Callout tone="danger" title="The BioIntel API is not reachable">
-          Start the backend with <code className="font-mono">uvicorn app.main:app --reload</code>{' '}
+        <Callout tone="crit" title="The BioIntel API is not reachable">
+          Start the backend with{' '}
+          <code className="rounded border border-line bg-subtle px-1 font-mono text-2xs">
+            uvicorn app.main:app --reload
+          </code>{' '}
           from the <code className="font-mono">backend</code> directory, then reload this page.
         </Callout>
       )}
 
       {health?.llm_degraded && (
-        <Callout tone="warning" title="Running without a language-model provider">
+        <Callout tone="warn" title="Running without a language-model provider">
           No <code className="font-mono">OPENAI_API_KEY</code> is configured, so analyses use
           BioIntel&apos;s deterministic offline analyser. Claims and evidence are still extracted and
           linked, but figures are not interpreted and evidence is matched lexically rather than
@@ -44,81 +71,68 @@ export default async function HomePage() {
         </Callout>
       )}
 
-      <div className="grid gap-6 lg:grid-cols-[1.4fr_1fr]">
+      <div className="grid gap-5 lg:grid-cols-[1.4fr_1fr]">
         <UploadPanel />
 
-        <div className="card">
-          <h2 className="text-base font-semibold">What you get</h2>
-          <ol className="mt-3 space-y-3 text-sm text-ink-600 dark:text-ink-400">
-            {[
-              ['Claims with provenance', 'Every extracted claim carries the verbatim quote and page it came from, verified against the document.'],
-              ['Literature adjudication', 'Each claim is searched against PubMed, Europe PMC and ClinicalTrials.gov, and each record is judged as supporting, contradicting or unrelated.'],
-              ['Credibility scoring', 'A deterministic, fully broken-down score combines the evidence tier the deck offers with what the literature actually shows.'],
-              ['Diligence questions', 'The specific technical questions to put to the company, with what a good answer looks like.'],
-              ['IC memo', 'A cited, exportable first-draft memo separating what the company claims, what the evidence shows, and what BioIntel infers.'],
-            ].map(([title, body], index) => (
+        <Card className="p-6">
+          <h2 className="text-[15px] font-semibold tracking-[-0.01em]">What you get</h2>
+          <ol className="mt-4 space-y-3.5">
+            {CAPABILITIES.map(([title, body], index) => (
               <li key={title} className="flex gap-3">
-                <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-ink-200 text-[11px] font-semibold text-ink-700 dark:bg-ink-800 dark:text-ink-300">
+                <span className="num mt-px flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-full bg-subtle text-2xs font-semibold text-fg-2">
                   {index + 1}
                 </span>
-                <span>
-                  <span className="font-medium text-ink-900 dark:text-ink-100">{title}.</span>{' '}
-                  {body}
+                <span className="text-[13px] leading-relaxed text-fg-2">
+                  <span className="font-medium text-fg">{title}.</span> {body}
                 </span>
               </li>
             ))}
           </ol>
-        </div>
+        </Card>
       </div>
 
       <section>
-        <h2 className="mb-3 text-base font-semibold">Recent decks</h2>
+        <h2 className="mb-3 text-[15px] font-semibold tracking-[-0.01em]">Recent decks</h2>
         {documents.length === 0 ? (
           <EmptyState
             title="No decks yet"
             description="Upload a pitch deck above to run your first analysis."
           />
         ) : (
-          <div className="overflow-hidden rounded-lg border border-ink-200 dark:border-ink-800">
-            <table className="w-full text-sm">
-              <thead className="bg-ink-100 text-left dark:bg-ink-900">
+          <Card className="overflow-hidden">
+            <table className="data-table">
+              <thead>
                 <tr>
-                  <th className="px-4 py-2.5 font-medium">Document</th>
-                  <th className="px-4 py-2.5 font-medium">Pages</th>
-                  <th className="px-4 py-2.5 font-medium">Size</th>
-                  <th className="px-4 py-2.5 font-medium">Uploaded</th>
-                  <th className="px-4 py-2.5" />
+                  <th>Document</th>
+                  <th className="w-[80px]">Pages</th>
+                  <th className="w-[100px]">Size</th>
+                  <th className="w-[150px]">Uploaded</th>
+                  <th className="w-[90px]" />
                 </tr>
               </thead>
-              <tbody className="divide-y divide-ink-200 bg-white dark:divide-ink-800 dark:bg-ink-950">
+              <tbody>
                 {documents.map((document) => (
-                  <tr key={document.id} className="hover:bg-ink-50 dark:hover:bg-ink-900">
-                    <td className="px-4 py-3">
+                  <tr key={document.id}>
+                    <td>
                       <Link
                         href={`/documents/${document.id}`}
-                        className="font-medium hover:underline"
+                        className="font-medium text-fg hover:underline"
                       >
                         {document.filename}
                       </Link>
                       {document.requires_ocr && (
-                        <span className="ml-2">
-                          <Chip>scanned</Chip>
+                        <span className="ml-2 align-middle">
+                          <Badge>Scanned</Badge>
                         </span>
                       )}
                     </td>
-                    <td className="px-4 py-3 tabular-nums text-ink-600 dark:text-ink-400">
-                      {document.page_count}
-                    </td>
-                    <td className="px-4 py-3 tabular-nums text-ink-600 dark:text-ink-400">
-                      {formatBytes(document.size_bytes)}
-                    </td>
-                    <td className="px-4 py-3 text-ink-600 dark:text-ink-400">
-                      {formatDate(document.created_at)}
-                    </td>
-                    <td className="px-4 py-3 text-right">
+                    <td className="num text-fg-2">{document.page_count}</td>
+                    <td className="num text-fg-2">{formatBytes(document.size_bytes)}</td>
+                    <td className="text-fg-2">{formatDate(document.created_at)}</td>
+                    <td className="text-right">
                       <Link
                         href={`/documents/${document.id}`}
-                        className="text-ink-500 hover:text-ink-900 dark:hover:text-ink-100"
+                        className="text-fg-3 transition-colors hover:text-fg"
                       >
                         Open →
                       </Link>
@@ -127,7 +141,7 @@ export default async function HomePage() {
                 ))}
               </tbody>
             </table>
-          </div>
+          </Card>
         )}
       </section>
     </div>

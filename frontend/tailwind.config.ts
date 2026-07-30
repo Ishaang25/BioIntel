@@ -1,24 +1,74 @@
 import type { Config } from 'tailwindcss';
 
+/**
+ * Colour is expressed as semantic tokens, not a raw palette.
+ *
+ * Every token resolves to a CSS custom property holding an `R G B` triplet, so
+ * Tailwind's opacity modifiers (`bg-panel/60`) keep working while light and
+ * dark themes are swapped in one place — `globals.css`. Components never name a
+ * concrete colour, which is what keeps the surface consistent as it grows.
+ */
+const token = (name: string) => `rgb(var(--${name}) / <alpha-value>)`;
+
 const config: Config = {
   content: ['./src/**/*.{ts,tsx}'],
   theme: {
     extend: {
       colors: {
-        ink: {
-          50: '#f8fafc', 100: '#f1f5f9', 200: '#e2e8f0', 300: '#cbd5e1',
-          400: '#94a3b8', 500: '#64748b', 600: '#475569', 700: '#334155',
-          800: '#1e293b', 900: '#0f172a', 950: '#020617',
-        },
+        canvas: token('c-canvas'),
+        panel: token('c-panel'),
+        subtle: token('c-subtle'),
+        line: token('c-line'),
+        'line-strong': token('c-line-strong'),
+        fg: token('c-fg'),
+        'fg-2': token('c-fg-2'),
+        'fg-3': token('c-fg-3'),
+        accent: token('c-accent'),
+        pos: token('c-pos'),
+        warn: token('c-warn'),
+        alert: token('c-alert'),
+        crit: token('c-crit'),
+        info: token('c-info'),
         band: {
-          strong: '#15803d', moderate: '#0369a1', limited: '#a16207',
-          weak: '#c2410c', unsupported: '#b91c1c',
+          strong: token('c-band-strong'),
+          moderate: token('c-band-moderate'),
+          limited: token('c-band-limited'),
+          weak: token('c-band-weak'),
+          unsupported: token('c-band-unsupported'),
         },
       },
       fontFamily: {
-        sans: ['ui-sans-serif', 'system-ui', '-apple-system', 'Segoe UI', 'sans-serif'],
-        serif: ['ui-serif', 'Georgia', 'serif'],
-        mono: ['ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],
+        sans: [
+          'ui-sans-serif',
+          'system-ui',
+          '-apple-system',
+          'Segoe UI Variable Text',
+          'Segoe UI',
+          'Inter',
+          'Helvetica Neue',
+          'Arial',
+          'sans-serif',
+        ],
+        serif: ['ui-serif', 'Iowan Old Style', 'Georgia', 'serif'],
+        mono: ['ui-monospace', 'SFMono-Regular', 'Cascadia Mono', 'Menlo', 'monospace'],
+      },
+      fontSize: {
+        '2xs': ['0.6875rem', { lineHeight: '1rem' }],
+      },
+      borderRadius: {
+        card: '10px',
+      },
+      boxShadow: {
+        // Minimal by design: enterprise surfaces read as paper, not as glass.
+        card: '0 1px 2px 0 rgb(var(--c-shadow) / 0.05)',
+        pop: '0 4px 16px -2px rgb(var(--c-shadow) / 0.14), 0 1px 3px rgb(var(--c-shadow) / 0.08)',
+        drawer: '-8px 0 32px -8px rgb(var(--c-shadow) / 0.18)',
+      },
+      maxWidth: {
+        prose: '68ch',
+      },
+      transitionDuration: {
+        DEFAULT: '120ms',
       },
     },
   },

@@ -1,23 +1,25 @@
 import Link from 'next/link';
 
-import { EmptyState, PageHeader, formatDate, formatDuration } from '@/components/ui';
+import { Badge, Card, EmptyState, PageHeader } from '@/components/ui';
 import { api } from '@/lib/api';
+import { formatDate, formatDuration, humanise } from '@/lib/format';
+import type { RunStatus } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
 
-const STATUS_STYLES: Record<string, string> = {
-  succeeded: 'text-emerald-600 dark:text-emerald-400',
-  failed: 'text-red-600 dark:text-red-400',
-  running: 'text-sky-600 dark:text-sky-400',
-  pending: 'text-ink-500',
-  cancelled: 'text-ink-500',
+const STATUS_TONE: Record<RunStatus, 'pos' | 'crit' | 'info' | 'neutral'> = {
+  succeeded: 'pos',
+  failed: 'crit',
+  running: 'info',
+  pending: 'neutral',
+  cancelled: 'neutral',
 };
 
 export default async function RunsPage() {
   const page = await api.listRuns(50);
 
   return (
-    <div>
+    <div className="page">
       <PageHeader title="Analyses" subtitle={`${page.total} total`} />
 
       {page.items.length === 0 ? (
@@ -25,49 +27,50 @@ export default async function RunsPage() {
           title="No analyses yet"
           description="Upload a pitch deck to run your first scientific due-diligence analysis."
           action={
-            <Link href="/" className="btn-primary">
+            <Link href="/" className="btn btn-sm btn-primary">
               Upload a deck
             </Link>
           }
         />
       ) : (
-        <div className="overflow-hidden rounded-lg border border-ink-200 dark:border-ink-800">
-          <table className="w-full text-sm">
-            <thead className="bg-ink-100 text-left dark:bg-ink-900">
+        <Card className="overflow-hidden">
+          <table className="data-table">
+            <thead>
               <tr>
-                <th className="px-4 py-2.5 font-medium">Run</th>
-                <th className="px-4 py-2.5 font-medium">Status</th>
-                <th className="px-4 py-2.5 font-medium">Stage</th>
-                <th className="px-4 py-2.5 font-medium">Duration</th>
-                <th className="px-4 py-2.5 font-medium">Started</th>
+                <th>Run</th>
+                <th className="w-[140px]">Status</th>
+                <th className="w-[180px]">Stage</th>
+                <th className="w-[110px]">Duration</th>
+                <th className="w-[190px]">Started</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-ink-200 bg-white dark:divide-ink-800 dark:bg-ink-950">
+            <tbody>
               {page.items.map((run) => (
-                <tr key={run.id} className="hover:bg-ink-50 dark:hover:bg-ink-900">
-                  <td className="px-4 py-3">
-                    <Link href={`/runs/${run.id}`} className="font-mono text-xs hover:underline">
-                      {run.id.slice(0, 16)}…
+                <tr key={run.id}>
+                  <td>
+                    <Link
+                      href={`/runs/${run.id}`}
+                      className="num font-mono text-2xs text-fg hover:underline"
+                    >
+                      {run.id}
                     </Link>
                   </td>
-                  <td className={`px-4 py-3 font-medium ${STATUS_STYLES[run.status] ?? ''}`}>
-                    {run.status}
-                    {run.status === 'running' && ` (${Math.round(run.progress * 100)}%)`}
+                  <td>
+                    <Badge tone={STATUS_TONE[run.status]}>
+                      {humanise(run.status)}
+                      {run.status === 'running' && (
+                        <span className="num">{Math.round(run.progress * 100)}%</span>
+                      )}
+                    </Badge>
                   </td>
-                  <td className="px-4 py-3 text-ink-600 dark:text-ink-400">
-                    {run.current_stage?.replace(/_/g, ' ') ?? '—'}
-                  </td>
-                  <td className="px-4 py-3 tabular-nums text-ink-600 dark:text-ink-400">
-                    {formatDuration(run.duration_ms)}
-                  </td>
-                  <td className="px-4 py-3 text-ink-600 dark:text-ink-400">
-                    {formatDate(run.created_at)}
-                  </td>
+                  <td className="text-fg-2">{humanise(run.current_stage) || '—'}</td>
+                  <td className="num text-fg-2">{formatDuration(run.duration_ms)}</td>
+                  <td className="text-fg-2">{formatDate(run.created_at)}</td>
                 </tr>
               ))}
             </tbody>
           </table>
-        </div>
+        </Card>
       )}
     </div>
   );

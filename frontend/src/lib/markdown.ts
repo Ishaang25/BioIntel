@@ -166,3 +166,34 @@ export function markdownToHtml(markdown: string): string {
   flushAll();
   return out.join('\n');
 }
+
+/**
+ * Turns `[C1]` reference markers in rendered report HTML into interactive
+ * citation tokens.
+ *
+ * A marker the report actually declares becomes a control that opens the record
+ * behind it. A marker it does not — the narrative sometimes cites a reference
+ * the citation list omits — becomes an inert, dimmed token that says so on
+ * hover, rather than a control that opens nothing or raw `[C34]` noise mixed in
+ * with live references.
+ *
+ * The rewrite runs on text only: the split keeps tags intact, so a
+ * reference-looking substring inside an attribute is never touched.
+ */
+const CITATION_MARKER = /\[([A-Z]{1,2}\d{1,3})\]/g;
+
+export function linkCitations(html: string, knownRefs: ReadonlySet<string>): string {
+  if (!html) return html;
+
+  return html
+    .split(/(<[^>]*>)/)
+    .map((chunk) => {
+      if (chunk.startsWith('<')) return chunk;
+      return chunk.replace(CITATION_MARKER, (_whole, ref: string) =>
+        knownRefs.has(ref)
+          ? `<button type="button" class="cite" data-cite="${ref}" aria-label="Reference ${ref}">${ref}</button>`
+          : `<span class="cite cite-dangling" title="Cited in the narrative but not present in this report's reference list.">${ref}</span>`,
+      );
+    })
+    .join('');
+}
