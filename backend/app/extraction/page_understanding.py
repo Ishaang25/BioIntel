@@ -19,13 +19,14 @@ from pathlib import Path
 from typing import Any
 
 from app.core.config import settings
-from app.core.enums import PageKind
+from app.core.enums import PageKind, PipelineStage
 from app.core.logging import get_logger
 from app.llm import prompts
 from app.llm.base import ImagePart
 from app.llm.budgets import output_budget
 from app.llm.client import LLMClient
 from app.llm.schemas import PageUnderstandingOut
+from app.pipeline.progress import NullProgress, ProgressReporter
 from app.utils.text import truncate
 
 log = get_logger(__name__)
@@ -115,9 +116,16 @@ def composite_page_text(page: PageInput, result: PageResult | None) -> str:
 
 
 class PageUnderstandingStage:
-    def __init__(self, llm: LLMClient, *, renders_dir: Path | None = None) -> None:
+    def __init__(
+        self,
+        llm: LLMClient,
+        *,
+        renders_dir: Path | None = None,
+        progress: ProgressReporter | None = None,
+    ) -> None:
         self.llm = llm
         self.renders_dir = renders_dir or settings.renders_dir
+        self._progress: ProgressReporter = progress or NullProgress()
 
     async def run(self, pages: list[PageInput]) -> list[PageResult]:
         targets = [p for p in pages if self._should_use_vision(p)]
@@ -140,8 +148,32 @@ class PageUnderstandingStage:
         }
 
         if targets:
+            # Admission is bounded here, not only inside the LLM client.
+            # `gather` starts every page coroutine at once and each one reads
+            # its render before its first await, so an unbounded gather holds
+            # one decoded PNG per page of the deck in memory at the same time
+            # -- the client's limit bounds requests in flight, not the bytes
+            # queued behind them. Gating entry keeps that to `concurrency`
+            # images, which is what makes a large deck safe on a small
+            # instance.
+            slots = asyncio.Semaphore(max(1, settings.llm_concurrency))
+            completed = 0
+
+            async def _bounded(page: PageInput) -> PageResult:
+                nonlocal completed
+                async with slots:
+                    try:
+                        return await self._understand(page)
+                    finally:
+                        completed += 1
+                        # Reported per page: this stage carries 18% of the run
+                        # and is where a large deck spends its first minutes.
+                        self._progress.advance(
+                            PipelineStage.PAGE_UNDERSTANDING, completed, len(targets)
+                        )
+
             gathered = await asyncio.gather(
-                *(self._understand(page) for page in targets), return_exceptions=True
+                *(_bounded(page) for page in targets), return_exceptions=True
             )
             for page, outcome in zip(targets, gathered, strict=True):
                 if isinstance(outcome, BaseException):

@@ -134,6 +134,16 @@ export function ReportWorkspace(props: ReportInput) {
           <ReportRail sections={sections} active={activeSection} onNavigate={goToSection} />
 
           <div className="min-w-0 flex-1 space-y-10">
+            {model.unavailable.length > 0 && (
+              <Callout tone="warn" title="Part of this report could not be loaded">
+                The {model.unavailable.join(', ')}{' '}
+                {model.unavailable.length === 1 ? 'endpoint' : 'endpoints'} did not respond, so
+                {model.unavailable.length === 1 ? ' that section is' : ' those sections are'} empty
+                below. This is a loading failure, not a finding — the analysis itself completed.
+                Reload to try again.
+              </Callout>
+            )}
+
             {model.degraded && (
               <Callout tone="warn" title="Degraded analysis">
                 This run was produced without a language-model provider. Claims and evidence were

@@ -7,7 +7,7 @@ import datetime as dt
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import Select, func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -349,13 +349,28 @@ def run_summary(session: Session, run_id: str) -> dict[str, Any]:
     return {k: int(v) for k, v in counts.items()}
 
 
+def evidence_ids_for_run(run_id: str) -> Select[tuple[str]]:
+    """Sub-select of the distinct evidence ids a run linked to.
+
+    De-duplication happens on the id alone. Applying ``DISTINCT`` to the
+    evidence rows themselves asks PostgreSQL to compare every selected column,
+    and several of them are ``json`` -- a type with no equality operator -- so
+    the query fails outright with
+
+        could not identify an equality operator for type json
+
+    Comparing one indexed ``varchar`` is also strictly less work than hashing a
+    wide row that carries abstracts and raw API payloads.
+    """
+    return (
+        select(ClaimEvidenceLink.evidence_id).where(ClaimEvidenceLink.run_id == run_id).distinct()
+    )
+
+
 def evidence_for_run(session: Session, run_id: str) -> list[EvidenceItem]:
     return list(
         session.execute(
-            select(EvidenceItem)
-            .join(ClaimEvidenceLink, ClaimEvidenceLink.evidence_id == EvidenceItem.id)
-            .where(ClaimEvidenceLink.run_id == run_id)
-            .distinct()
+            select(EvidenceItem).where(EvidenceItem.id.in_(evidence_ids_for_run(run_id)))
         ).scalars()
     )
 

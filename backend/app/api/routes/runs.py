@@ -16,7 +16,7 @@ from app.core.config import settings
 from app.core.enums import RunStatus
 from app.core.errors import NotFound
 from app.core.logging import get_logger
-from app.db.models import AnalysisRun, Claim, ClaimEvidenceLink, EvidenceItem
+from app.db.models import AnalysisRun, Claim, EvidenceItem
 from app.db.session import session_scope
 from app.reporting.renderer import render_html
 from app.schemas.api import (
@@ -314,10 +314,8 @@ def list_evidence(session: DbSession, run_id: str) -> list[EvidenceOut]:
     run_service.get_run(session, run_id)
     rows = session.execute(
         select(EvidenceItem)
-        .join(ClaimEvidenceLink, ClaimEvidenceLink.evidence_id == EvidenceItem.id)
-        .where(ClaimEvidenceLink.run_id == run_id)
-        .distinct()
-        .order_by(EvidenceItem.publication_year.desc())
+        .where(EvidenceItem.id.in_(run_service.evidence_ids_for_run(run_id)))
+        .order_by(EvidenceItem.publication_year.desc().nulls_last(), EvidenceItem.id)
     ).scalars()
     return [EvidenceOut.model_validate(r) for r in rows]
 

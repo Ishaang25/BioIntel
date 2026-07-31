@@ -19,6 +19,7 @@ from app.extraction.claims import ClaimExtractionResult
 from app.extraction.entities import EntityExtractionResult
 from app.extraction.page_understanding import PageInput, PageResult
 from app.llm.schemas import ClaimVerdictOut, CompanyProfileOut
+from app.pipeline.progress import NullProgress, ProgressReporter
 from app.reporting.builder import BuiltReport, ReferenceTable
 
 
@@ -34,6 +35,11 @@ class RunContext:
     run_id: str
     document_id: str
     started_at: dt.datetime
+
+    #: Reports completion within the stage currently running. Replaced by the
+    #: stage runner on every stage; defaults to a no-op so a context built
+    #: outside the pipeline (tests, scripts) needs no wiring.
+    progress: ProgressReporter = field(default_factory=NullProgress)
 
     # -- parse -------------------------------------------------------------
     pages: list[PageInput] = field(default_factory=list)

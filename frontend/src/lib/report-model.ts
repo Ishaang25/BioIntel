@@ -551,6 +551,8 @@ export interface ReportModel {
   subtitle: string | null;
   tags: string[];
   degraded: boolean;
+  /** Secondary endpoints that failed to load; their sections are empty. */
+  unavailable: string[];
 
   createdAt: string;
   durationMs: number | null;
@@ -605,6 +607,12 @@ export interface ReportInput {
   entities: Entity[];
   evidence: Evidence[];
   evidenceByClaim: Record<string, EvidenceLink[]>;
+  /**
+   * Names of the secondary endpoints that failed to load. The report still
+   * renders; these sections are empty and the reader is told which, so an
+   * empty panel is never mistaken for a finding of "nothing here".
+   */
+  degraded?: string[];
 }
 
 const ASSESSMENT_LABELS: Array<[string, string]> = [
@@ -945,6 +953,7 @@ export function buildReportModel(input: ReportInput): ReportModel {
     subtitle: profile?.one_liner ?? null,
     tags,
     degraded: run.degraded,
+    unavailable: input.degraded ?? [],
 
     createdAt: report.created_at,
     durationMs: run.duration_ms,

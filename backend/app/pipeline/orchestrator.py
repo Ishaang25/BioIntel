@@ -98,6 +98,7 @@ from app.llm import prompts
 from app.llm.client import LLMClient
 from app.llm.schemas import ClaimVerdictOut, QueryPlanOut, ScientificAssessmentOut
 from app.pipeline.context import RunContext
+from app.pipeline.progress import StageProgress
 from app.reporting.builder import ReferenceTable, ReportBuilder
 from app.reporting.renderer import render_markdown
 from app.utils.text import normalize_entity_key, truncate
@@ -215,6 +216,12 @@ class AnalysisPipeline:
         before = self._llm_snapshot(stage)
         _update_stage(context.run_id, stage, StageStatus.RUNNING, started_at=started)
         _update_run_stage(context.run_id, stage, _progress_before(stage))
+        # Stages that iterate report inside their own weight band, so the bar
+        # keeps moving through the long ones instead of sitting at the value it
+        # started with. See app.pipeline.progress.
+        context.progress = StageProgress(
+            context.run_id, _update_run_stage, base=_progress_before(stage)
+        )
         log.info("stage.start", stage=stage.value)
 
         try:
@@ -404,7 +411,7 @@ class AnalysisPipeline:
 
     async def _stage_page_understanding(self, context: RunContext, document: Document) -> None:
         assert self.llm is not None
-        stage = PageUnderstandingStage(self.llm)
+        stage = PageUnderstandingStage(self.llm, progress=context.progress)
         results = await stage.run(context.pages)
 
         with session_scope() as session:

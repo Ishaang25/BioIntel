@@ -68,14 +68,19 @@ services:
       - key: RUN_MIGRATIONS
         value: "true"
 
-      # --- free-instance tuning --------------------------------------------
-      # Defaults (12 and 4) are sized for a real machine. On 512 MB, a dozen
-      # concurrent vision calls each holding a base64 page render is the most
-      # likely way to be OOM-killed mid-analysis. Raise these on a larger plan.
+      # --- concurrency -----------------------------------------------------
+      # These were lowered to 4 and 2 to avoid OOM on a 512 MB instance. That
+      # treated the symptom: page understanding gathered every page at once and
+      # each coroutine read its render before its first await, so one decoded
+      # PNG per page of the deck was resident no matter what this was set to.
+      # Admission is now bounded at the gather (see PageUnderstandingStage), so
+      # the resident set is `concurrency` images rather than the whole deck, and
+      # the default is safe again. Every parallel stage -- page understanding,
+      # entities, claims, assessment -- scales with this.
       - key: LLM_CONCURRENCY
-        value: "4"
+        value: "12"
       - key: RETRIEVAL_CONCURRENCY
-        value: "2"
+        value: "4"
 
       # --- observability ---------------------------------------------------
       - key: LOG_JSON

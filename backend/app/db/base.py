@@ -94,9 +94,21 @@ class EnumType(TypeDecorator):
 
 
 class StringList(TypeDecorator):
-    """A ``list[str]`` stored as a JSON array, portable across backends."""
+    """A ``list[str]`` stored as a JSON array, portable across backends.
 
-    impl = JSON
+    Uses ``jsonb`` on PostgreSQL for the same reason :data:`JSONType` does, and
+    it is not merely a performance preference: PostgreSQL's ``json`` type has no
+    equality operator, so a ``SELECT DISTINCT``, ``UNION`` or ``GROUP BY`` over
+    any table containing one fails with
+
+        could not identify an equality operator for type json
+
+    This decorator originally declared plain ``JSON``, which put fourteen such
+    columns across eight tables one query away from that error. SQLite has no
+    json/jsonb distinction, so nothing local ever showed it.
+    """
+
+    impl = JSON().with_variant(JSONB(), "postgresql")
     cache_ok = True
 
     def process_bind_param(self, value: Any, dialect: Any) -> Any:
