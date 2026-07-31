@@ -1259,10 +1259,21 @@ class AnalysisPipeline:
 
     async def _stage_report(self, context: RunContext, document: Document) -> None:
         assert self.llm is not None
+        # Five sub-steps. The stage is the last 5% of the run and its central
+        # call generates ~15k tokens, so without these the bar sits at 0.95 for
+        # the whole of it and the run looks hung. Step 3 is the long one; the
+        # tick before it is what tells a reader the memo is being written
+        # rather than that something has stopped.
+        steps = 5
+        context.progress.advance(PipelineStage.REPORT, 0, steps)
+
         await self._scientific_assessment(context)
+        context.progress.advance(PipelineStage.REPORT, 1, steps)
+
         summaries, _ = _claim_summaries(context)
         references = _build_references(context, summaries)
         context.references = references
+        context.progress.advance(PipelineStage.REPORT, 2, steps)
 
         overall = context.overall or OverallScore(
             score=0.0, band=_default_band(), confidence=0.0, breakdown={}
@@ -1283,6 +1294,7 @@ class AnalysisPipeline:
             scientific_assessment=context.scientific_assessment,
         )
         context.report = report
+        context.progress.advance(PipelineStage.REPORT, 3, steps)
 
         markdown = render_markdown(
             report,
@@ -1318,6 +1330,8 @@ class AnalysisPipeline:
                     limitations=report.limitations,
                 )
             )
+
+        context.progress.advance(PipelineStage.REPORT, steps, steps)
 
         context.record(
             PipelineStage.REPORT,

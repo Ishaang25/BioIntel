@@ -95,7 +95,15 @@ class Settings(BaseSettings):
     model_embedding: str = "text-embedding-3-small"
     embedding_dimensions: int = 1536
 
+    #: Floor for one call's wall-clock budget. The effective timeout scales up
+    #: with the call's output budget -- see `_timeout_for` -- because a flat
+    #: ceiling cuts off long generations mid-write, and a timeout is retryable,
+    #: so the work restarts from nothing.
     llm_timeout_seconds: float = 180.0
+    #: Assumed sustained output rate, used to size the timeout above. Counts
+    #: reasoning tokens, which a reasoning model emits before any visible text.
+    #: Lower this if timeouts appear in the logs; it buys headroom, not latency.
+    llm_output_tokens_per_second: float = 40.0
     llm_max_retries: int = 4
     #: Absolute ceiling on one response, reasoning tokens included. Runaway
     #: output is bounded by chunk size, not by this -- its job is to stop a

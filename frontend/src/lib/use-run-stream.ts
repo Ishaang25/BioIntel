@@ -15,6 +15,31 @@ export function isTerminal(status: RunStatus | undefined): boolean {
   return status !== undefined && TERMINAL.includes(status);
 }
 
+/**
+ * Chooses between the snapshot on screen and one that just arrived.
+ *
+ * This previously kept the current snapshot whenever `current.status` equalled
+ * the incoming status -- which is `'running' === 'running'` for the whole
+ * analysis, so every poll discarded its own response and the UI froze on
+ * whichever stage was current when the event stream was cut. On a host that
+ * caps function duration the stream dies after about a minute, which is early
+ * enough that the frozen stage was almost always page understanding.
+ *
+ * Both the stream and the poll read the same row, so there is no freshness
+ * race to arbitrate. The only invariant worth enforcing is that a mid-run bar
+ * never runs backwards; a terminal snapshot is always adopted, because a
+ * failed run legitimately reports less progress than it had reached.
+ */
+export function mergeProgress(
+  current: ProgressEvent | null,
+  fresh: ProgressEvent,
+): ProgressEvent {
+  if (current && !isTerminal(fresh.status) && fresh.progress < current.progress) {
+    return current;
+  }
+  return fresh;
+}
+
 export interface RunStream {
   run: RunDetail | null;
   progress: ProgressEvent | null;
@@ -52,12 +77,7 @@ export function useRunStream(runId: string, initialRun: RunDetail | null): RunSt
     try {
       const next = await api.getRun(runId);
       setRun(next);
-      setProgress((current) =>
-        // A live stream is more current than a poll; do not regress it.
-        current && !isTerminal(next.status) && current.status === next.status
-          ? current
-          : progressFromRun(next),
-      );
+      setProgress((current) => mergeProgress(current, progressFromRun(next)));
       setError(null);
       return next;
     } catch (cause) {

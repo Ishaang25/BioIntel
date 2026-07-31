@@ -80,12 +80,30 @@ class OpenAIProvider:
             )
         return [{"role": "user", "content": content}]
 
+    def _timeout_for(self, request: LLMRequest) -> float:
+        """Wall-clock budget for one call, scaled to what it must generate.
+
+        A single flat timeout is wrong at both ends. The report call is
+        budgeted ~15-32k output tokens and a reasoning model writes those
+        serially; at 180s it can be cut off mid-generation on a slow link while
+        working perfectly. Because a timeout is retryable, the stage then
+        regenerates from scratch -- up to `llm_max_retries` times -- so a call
+        that merely needed longer turns into twenty minutes of repeated work
+        that looks, from the outside, exactly like one slow call.
+
+        The floor stays `llm_timeout_seconds`, so short calls are unaffected.
+        """
+        budget = request.max_output_tokens or settings.llm_max_output_tokens
+        needed = budget / max(1.0, settings.llm_output_tokens_per_second)
+        return max(settings.llm_timeout_seconds, needed)
+
     def _build_kwargs(self, request: LLMRequest, *, strict: bool) -> dict[str, Any]:
         kwargs: dict[str, Any] = {
             "model": request.model,
             "instructions": request.system,
             "input": self._build_input(request),
             "max_output_tokens": request.max_output_tokens or settings.llm_max_output_tokens,
+            "timeout": self._timeout_for(request),
             "text": {
                 "format": schema_payload(request.schema_name, request.schema_model, strict=strict)
             },
@@ -141,10 +159,43 @@ class OpenAIProvider:
         ):
             with attempt:
                 attempts += 1
+                attempt_started = time.perf_counter()
+                if attempts > 1:
+                    # The one line that distinguishes "this model is slow" from
+                    # "this call has been restarted four times". A retry throws
+                    # away everything generated so far, so a long stage that is
+                    # silently retrying costs attempts x timeout and looks
+                    # identical from outside to a single slow call.
+                    log.warning(
+                        "llm.retrying",
+                        purpose=request.purpose,
+                        model=request.model,
+                        attempt=attempts,
+                        max_attempts=settings.llm_max_retries,
+                        elapsed_s=round(time.perf_counter() - started, 1),
+                        previous_error=type(last_error).__name__ if last_error else None,
+                        timeout_s=settings.llm_timeout_seconds,
+                    )
                 try:
                     response = await self._client.responses.create(
                         **self._build_kwargs(request, strict=strict)
                     )
+                except APITimeoutError as exc:
+                    last_error = exc
+                    # Named explicitly because the remedy differs from every
+                    # other retryable failure: the request was fine and the
+                    # model was still writing when the clock ran out, so the
+                    # fix is a longer timeout, not a retry.
+                    log.warning(
+                        "llm.timeout",
+                        purpose=request.purpose,
+                        model=request.model,
+                        attempt=attempts,
+                        timeout_s=settings.llm_timeout_seconds,
+                        attempt_elapsed_s=round(time.perf_counter() - attempt_started, 1),
+                        max_output_tokens=request.max_output_tokens,
+                    )
+                    raise
                 except BadRequestError as exc:
                     # A schema the API refuses is a permanent error; retrying
                     # in non-strict mode is the one useful recovery.
