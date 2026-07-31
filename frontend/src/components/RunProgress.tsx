@@ -1,13 +1,8 @@
 'use client';
 
-import { useRouter } from 'next/navigation';
-import { useEffect, useRef, useState } from 'react';
-
 import { formatDuration, humanise } from '@/lib/format';
 import { Card, cx } from '@/components/ui';
 import type { ProgressEvent, RunStatus, StageStatus } from '@/lib/types';
-
-const TERMINAL: RunStatus[] = ['succeeded', 'failed', 'cancelled'];
 
 const STAGE_DOT: Record<StageStatus, string> = {
   pending: 'bg-line-strong',
@@ -28,53 +23,21 @@ const HEADLINE: Record<RunStatus, string> = {
 /**
  * Live progress for an in-flight analysis.
  *
- * Subscribes to the API's server-sent event stream and refreshes the server
- * component tree once the run reaches a terminal state, so the finished page
- * renders with real data rather than a client-side patchwork.
+ * Presentational only. Subscribing to the run is `useRunStream`'s job — this
+ * used to own an EventSource *and* call `router.refresh()` to advance, which
+ * re-ran the page on the server every few seconds.
  */
-export function RunProgress({ runId, initial }: { runId: string; initial: ProgressEvent }) {
-  const router = useRouter();
-  const [progress, setProgress] = useState<ProgressEvent>(initial);
-  const [connected, setConnected] = useState(true);
-  const refreshed = useRef(false);
-
-  useEffect(() => {
-    if (TERMINAL.includes(initial.status)) return;
-
-    const source = new EventSource(`/api/proxy/runs/${runId}/events`);
-
-    const onProgress = (event: MessageEvent<string>) => {
-      try {
-        const payload = JSON.parse(event.data) as ProgressEvent;
-        setProgress(payload);
-        if (TERMINAL.includes(payload.status) && !refreshed.current) {
-          refreshed.current = true;
-          source.close();
-          router.refresh();
-        }
-      } catch {
-        /* ignore malformed frames */
-      }
-    };
-
-    source.addEventListener('progress', onProgress);
-    source.addEventListener('done', onProgress);
-    source.onopen = () => setConnected(true);
-    source.onerror = () => setConnected(false);
-
-    return () => source.close();
-  }, [runId, initial.status, router]);
-
-  // Fall back to polling if the event stream cannot be established.
-  useEffect(() => {
-    if (connected || TERMINAL.includes(progress.status)) return;
-    const timer = setInterval(() => router.refresh(), 5000);
-    return () => clearInterval(timer);
-  }, [connected, progress.status, router]);
-
+export function RunProgress({
+  progress,
+  streaming,
+}: {
+  progress: ProgressEvent;
+  streaming: boolean;
+}) {
   const percent = Math.round(progress.progress * 100);
   const failed = progress.status === 'failed';
   const done = progress.stages.filter((stage) => stage.status === 'succeeded').length;
+  const settled = progress.status === 'succeeded' || failed || progress.status === 'cancelled';
 
   return (
     <Card className="p-6">
@@ -142,9 +105,11 @@ export function RunProgress({ runId, initial }: { runId: string; initial: Progre
         ))}
       </ol>
 
-      {!connected && !TERMINAL.includes(progress.status) && (
+      {!settled && (
         <p className="mt-4 text-2xs text-fg-3">
-          Live updates unavailable; refreshing periodically instead.
+          {streaming
+            ? 'Live updates connected. This page stays current on its own.'
+            : 'Checking for updates every few seconds.'}
         </p>
       )}
     </Card>

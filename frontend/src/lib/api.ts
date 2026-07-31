@@ -38,13 +38,29 @@ export class ApiRequestError extends Error {
   }
 }
 
-interface RequestOptions extends RequestInit {
+/**
+ * Default ceiling on a single API call.
+ *
+ * Every caller runs inside something with a hard limit of its own — a Vercel
+ * function, or a browser tab a person is staring at. An unbounded `fetch`
+ * against a saturated backend does not fail, it hangs, and the surrounding
+ * function is killed with no useful error. Bounding the request turns that
+ * into an ordinary handled failure.
+ */
+const DEFAULT_TIMEOUT_MS = 12_000;
+
+/** Uploads carry up to 50 MB and are the one call worth waiting on. */
+const UPLOAD_TIMEOUT_MS = 120_000;
+
+export interface RequestOptions extends RequestInit {
   /** Seconds; omit for the Next.js default. */
   revalidate?: number;
+  /** Abort after this many milliseconds. Pass 0 to wait indefinitely. */
+  timeoutMs?: number;
 }
 
 async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const { revalidate, ...init } = options;
+  const { revalidate, timeoutMs = DEFAULT_TIMEOUT_MS, ...init } = options;
   const isServer = typeof window === 'undefined';
   const base = isServer ? `${SERVER_BASE}${API_PREFIX}` : '/api/proxy';
 
@@ -54,13 +70,27 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
     headers.set('X-API-Key', process.env.BIOINTEL_API_KEY);
   }
 
-  const response = await fetch(`${base}${path}`, {
-    ...init,
-    headers,
-    // Analysis state changes constantly; never serve it from a stale cache.
-    cache: revalidate === undefined ? 'no-store' : undefined,
-    ...(revalidate !== undefined ? { next: { revalidate } } : {}),
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${base}${path}`, {
+      ...init,
+      headers,
+      signal: init.signal ?? (timeoutMs > 0 ? AbortSignal.timeout(timeoutMs) : null),
+      // Analysis state changes constantly; never serve it from a stale cache.
+      cache: revalidate === undefined ? 'no-store' : undefined,
+      ...(revalidate !== undefined ? { next: { revalidate } } : {}),
+    });
+  } catch (cause) {
+    const name = cause instanceof Error ? cause.name : '';
+    if (name === 'TimeoutError' || name === 'AbortError') {
+      throw new ApiRequestError(
+        504,
+        'timeout',
+        `The BioIntel API did not respond within ${Math.round(timeoutMs / 1000)}s.`,
+      );
+    }
+    throw new ApiRequestError(503, 'network_error', 'The BioIntel API is not reachable.');
+  }
 
   if (!response.ok) {
     let code = 'http_error';
@@ -82,7 +112,7 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
 }
 
 export const api = {
-  health: () => request<Health>('/health'),
+  health: (options?: RequestOptions) => request<Health>('/health', options),
 
   listDocuments: (limit = 50, offset = 0) =>
     request<Paginated<DocumentSummary>>(`/documents?limit=${limit}&offset=${offset}`),
@@ -97,13 +127,18 @@ export const api = {
     if (notes) form.append('notes', notes);
     form.append('analyze', String(analyze));
     // Let the browser set the multipart boundary.
-    return request<UploadResponse>('/documents', { method: 'POST', body: form });
+    return request<UploadResponse>('/documents', {
+      method: 'POST',
+      body: form,
+      timeoutMs: UPLOAD_TIMEOUT_MS,
+    });
   },
 
   listRuns: (limit = 50, offset = 0) =>
     request<Paginated<Run>>(`/runs?limit=${limit}&offset=${offset}`),
 
-  getRun: (id: string) => request<RunDetail>(`/runs/${id}`),
+  getRun: (id: string, options?: RequestOptions) =>
+    request<RunDetail>(`/runs/${id}`, options),
 
   createRun: (documentId: string, force = false) =>
     request<Run>('/runs', {
@@ -114,20 +149,29 @@ export const api = {
 
   cancelRun: (id: string) => request<Run>(`/runs/${id}/cancel`, { method: 'POST' }),
 
-  listClaims: (runId: string, params: { limit?: number; thesisCritical?: boolean } = {}) => {
+  listClaims: (
+    runId: string,
+    params: { limit?: number; thesisCritical?: boolean } = {},
+    options?: RequestOptions,
+  ) => {
     const search = new URLSearchParams({ limit: String(params.limit ?? 200) });
     if (params.thesisCritical) search.set('thesis_critical', 'true');
-    return request<Paginated<Claim>>(`/runs/${runId}/claims?${search}`);
+    return request<Paginated<Claim>>(`/runs/${runId}/claims?${search}`, options);
   },
 
-  getClaim: (runId: string, claimId: string) =>
-    request<ClaimDetail>(`/runs/${runId}/claims/${claimId}`),
+  getClaim: (runId: string, claimId: string, options?: RequestOptions) =>
+    request<ClaimDetail>(`/runs/${runId}/claims/${claimId}`, options),
 
-  listEntities: (runId: string) => request<Entity[]>(`/runs/${runId}/entities`),
-  listEvidence: (runId: string) => request<Evidence[]>(`/runs/${runId}/evidence`),
-  listQuestions: (runId: string) => request<Question[]>(`/runs/${runId}/questions`),
-  listRisks: (runId: string) => request<Risk[]>(`/runs/${runId}/risks`),
-  getReport: (runId: string) => request<Report>(`/runs/${runId}/report`),
+  listEntities: (runId: string, options?: RequestOptions) =>
+    request<Entity[]>(`/runs/${runId}/entities`, options),
+  listEvidence: (runId: string, options?: RequestOptions) =>
+    request<Evidence[]>(`/runs/${runId}/evidence`, options),
+  listQuestions: (runId: string, options?: RequestOptions) =>
+    request<Question[]>(`/runs/${runId}/questions`, options),
+  listRisks: (runId: string, options?: RequestOptions) =>
+    request<Risk[]>(`/runs/${runId}/risks`, options),
+  getReport: (runId: string, options?: RequestOptions) =>
+    request<Report>(`/runs/${runId}/report`, options),
 
   reportExportUrl: (runId: string, format: 'markdown' | 'html') =>
     `/api/proxy/runs/${runId}/report/export?format=${format}`,

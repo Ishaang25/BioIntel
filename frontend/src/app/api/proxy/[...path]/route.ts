@@ -17,6 +17,33 @@ const ALLOWED_ROOTS = new Set(['documents', 'runs', 'health', 'vocabularies']);
 
 export const dynamic = 'force-dynamic';
 
+/**
+ * Ceiling for one proxied call.
+ *
+ * Serverless hosts kill a function that exceeds their plan limit, and a killed
+ * function returns nothing the browser can act on. Failing at a deadline we
+ * choose produces a real 504 that the client can retry.
+ */
+export const maxDuration = 60;
+
+/**
+ * Upstream deadline for ordinary requests, kept under `maxDuration` so the
+ * timeout is ours rather than the platform's.
+ */
+const UPSTREAM_TIMEOUT_MS = 45_000;
+
+/** Uploads stream a file and legitimately take longer than a read. */
+const UPLOAD_TIMEOUT_MS = 55_000;
+
+/**
+ * The progress stream is long-lived by design and must not be aborted on a
+ * timer: it is cut when the platform's duration cap is reached, and the client
+ * falls back to polling. Bounding it here would just cut it sooner.
+ */
+function isEventStream(path: string[]): boolean {
+  return path[path.length - 1] === 'events';
+}
+
 function buildHeaders(request: NextRequest): Headers {
   const headers = new Headers();
   const contentType = request.headers.get('content-type');
@@ -38,6 +65,9 @@ async function forward(request: NextRequest, path: string[]): Promise<Response> 
   const search = request.nextUrl.search;
   const target = `${API_URL}${API_PREFIX}/${path.join('/')}${search}`;
 
+  const streaming = isEventStream(path);
+  const timeoutMs = request.method === 'POST' ? UPLOAD_TIMEOUT_MS : UPSTREAM_TIMEOUT_MS;
+
   const init: RequestInit = {
     method: request.method,
     headers: buildHeaders(request),
@@ -45,6 +75,7 @@ async function forward(request: NextRequest, path: string[]): Promise<Response> 
     ...(request.method !== 'GET' && request.method !== 'HEAD'
       ? { body: request.body, duplex: 'half' }
       : {}),
+    ...(streaming ? {} : { signal: AbortSignal.timeout(timeoutMs) }),
     cache: 'no-store',
   } as RequestInit;
 
@@ -62,7 +93,17 @@ async function forward(request: NextRequest, path: string[]): Promise<Response> 
       statusText: upstream.statusText,
       headers: responseHeaders,
     });
-  } catch {
+  } catch (cause) {
+    const name = cause instanceof Error ? cause.name : '';
+    if (name === 'TimeoutError' || name === 'AbortError') {
+      return NextResponse.json(
+        {
+          code: 'upstream_timeout',
+          message: `The BioIntel API did not respond within ${Math.round(timeoutMs / 1000)}s.`,
+        },
+        { status: 504 },
+      );
+    }
     return NextResponse.json(
       {
         code: 'upstream_unavailable',
