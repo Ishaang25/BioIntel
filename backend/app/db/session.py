@@ -18,7 +18,11 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.core.config import BACKEND_ROOT, settings
+from app.core.logging import get_logger
 from app.db.base import Base
+from app.db.sanitize import scrub_instance
+
+log = get_logger(__name__)
 
 _engine: Engine | None = None
 _SessionFactory: sessionmaker[Session] | None = None
@@ -63,6 +67,33 @@ def get_engine() -> Engine:
     return _engine
 
 
+def install_nul_guard(factory: sessionmaker[Session]) -> None:
+    """Strip NUL bytes from every object about to be written.
+
+    ``before_flush`` is the one place that sees all of it: every write in this
+    application goes through the ORM unit of work, so a single listener covers
+    all 19 tables and every column, including the JSON ones -- which matters,
+    because a NUL inside a JSON value survives serialisation as ``\\u0000`` and
+    PostgreSQL's ``jsonb`` rejects that too.
+
+    It runs here rather than in a type decorator because JSON values must be
+    cleaned *before* serialisation, and rather than in the extraction code
+    because the guarantee should hold for anything written, not only for the
+    paths someone remembered.
+    """
+
+    @event.listens_for(factory, "before_flush")
+    def _strip_nul_bytes(session: Session, _context: Any, _instances: Any) -> None:
+        for instance in (*session.new, *session.dirty):
+            changed = scrub_instance(instance)
+            if changed:
+                log.warning(
+                    "db.nul_bytes_stripped",
+                    table=type(instance).__tablename__,
+                    columns=changed,
+                )
+
+
 def get_session_factory() -> sessionmaker[Session]:
     global _SessionFactory
     if _SessionFactory is None:
@@ -73,6 +104,7 @@ def get_session_factory() -> sessionmaker[Session]:
             expire_on_commit=False,
             class_=Session,
         )
+        install_nul_guard(_SessionFactory)
     return _SessionFactory
 
 
