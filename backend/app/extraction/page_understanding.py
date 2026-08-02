@@ -169,7 +169,10 @@ class PageUnderstandingStage:
                         # Reported per page: this stage carries 18% of the run
                         # and is where a large deck spends its first minutes.
                         self._progress.advance(
-                            PipelineStage.PAGE_UNDERSTANDING, completed, len(targets)
+                            PipelineStage.PAGE_UNDERSTANDING,
+                            completed,
+                            len(targets),
+                            f"Reading page {completed} of {len(targets)}",
                         )
 
             gathered = await asyncio.gather(

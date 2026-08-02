@@ -53,6 +53,7 @@ export function progressFromRun(run: RunDetail): ProgressEvent {
     run_id: run.id,
     status: run.status,
     current_stage: run.current_stage,
+    current_activity: run.current_activity ?? null,
     progress: run.progress,
     error_code: run.error_code,
     error_message: run.error_message,

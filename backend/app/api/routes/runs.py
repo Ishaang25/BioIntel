@@ -16,7 +16,7 @@ from app.core.config import settings
 from app.core.enums import RunStatus
 from app.core.errors import NotFound
 from app.core.logging import get_logger
-from app.db.models import AnalysisRun, Claim, EvidenceItem
+from app.db.models import AnalysisRun, Claim, CompanyProfile, Document, EvidenceItem
 from app.db.session import session_scope
 from app.reporting.renderer import render_html
 from app.schemas.api import (
@@ -91,12 +91,39 @@ def list_runs(
         query = query.where(AnalysisRun.document_id == document_id)
     if run_status:
         query = query.where(AnalysisRun.status == run_status)
+
+    # A list of run ids is unusable: the reader knows the company, not the
+    # identifier. Both labels are resolved here in two statements rather than
+    # per row, so the list stays one query's worth of work.
+    labels = _run_labels(session, [r.id for r in items])
+
+    out: list[RunOut] = []
+    for run in items:
+        row = RunOut.model_validate(run)
+        filename, company = labels.get(run.id, (None, None))
+        row.document_filename = filename
+        row.company_name = company
+        out.append(row)
+
     return Page[RunOut](
-        items=[RunOut.model_validate(r) for r in items],
+        items=out,
         total=int(session.execute(query).scalar_one()),
         limit=page.limit,
         offset=page.offset,
     )
+
+
+def _run_labels(session: DbSession, run_ids: list[str]) -> dict[str, tuple[str | None, str | None]]:
+    """Filename and company name for each run, keyed by run id."""
+    if not run_ids:
+        return {}
+    rows = session.execute(
+        select(AnalysisRun.id, Document.filename, CompanyProfile.company_name)
+        .join(Document, Document.id == AnalysisRun.document_id)
+        .outerjoin(CompanyProfile, CompanyProfile.run_id == AnalysisRun.id)
+        .where(AnalysisRun.id.in_(run_ids))
+    ).all()
+    return {row[0]: (row[1], row[2]) for row in rows}
 
 
 @router.get(
@@ -191,6 +218,7 @@ def _progress_snapshot(run_id: str) -> dict[str, Any] | None:
             "run_id": run.id,
             "status": str(run.status),
             "current_stage": str(run.current_stage) if run.current_stage else None,
+            "current_activity": run.current_activity,
             "progress": run.progress,
             "error_code": run.error_code,
             "error_message": run.error_message,

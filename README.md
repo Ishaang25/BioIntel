@@ -181,6 +181,53 @@ for the annotated list. The ones that matter most:
 | `API_KEYS` | — | Comma-separated keys. Empty disables auth; refused in production. |
 | `LLM_MAX_CALLS_PER_RUN` | 400 | Hard cost ceiling per analysis. |
 | `RETRIEVAL_ENABLED` | `true` | Set false to analyse without external calls. |
+| `CORS_ORIGINS` | localhost | **Must list the frontend's origin when deployed** — see below. |
+
+### Uploading large decks
+
+The browser reaches the API through the frontend's server-side proxy, which
+holds the API key. On a serverless host that proxy has a request-body ceiling
+it does not control: a Vercel Serverless Function may receive at most **4.5 MB**
+on every plan, and the request is rejected at the edge with `413` before any
+application code runs. The API's own limit is `MAX_UPLOAD_MB` (50 by default).
+
+Anything above the proxy's ceiling is therefore uploaded **straight to the API**.
+The frontend's server exchanges its API key for a short-lived, single-use ticket
+(`POST /documents/upload-ticket`) and the browser posts the file directly with
+`X-Upload-Ticket`. See [`backend/app/core/upload_tickets.py`](backend/app/core/upload_tickets.py).
+
+Two things this requires in a deployed environment:
+
+- `CORS_ORIGINS` on the API must include the frontend's origin. The direct
+  upload is cross-origin; without this it fails with an opaque browser error.
+- The API must be reachable from the browser. It normally is — set
+  `BIOINTEL_PUBLIC_API_URL` on the frontend only when the internal and external
+  addresses differ.
+
+If direct upload is unavailable, the product does not fail silently: it states
+the largest file it can accept and asks for a compressed PDF.
+
+A self-hosted `next start` has no such ceiling, so everything goes through the
+proxy and neither setting is needed.
+
+### Deployment shape: one API instance
+
+The API runs as a single process and assumes it is the only one. Three things
+depend on that, in descending order of how loudly they break:
+
+1. Uploaded PDFs and page renders are written to the instance's local disk and
+   addressed by absolute path, so a request routed to a second replica cannot
+   find the document at all.
+2. Rate-limit counters live in process memory (`app/api/deps.py`), so N replicas
+   permit N times the configured limit.
+3. Redeemed upload tickets are remembered in process memory
+   (`app/core/upload_tickets.py`), so a replayed ticket landing on a different
+   replica inside its 15-minute TTL would be accepted.
+
+Scaling out means addressing all three — object storage for (1), a shared
+counter for (2), and a `ReplayLedger` implementation for (3), which is a class
+plus one `set_replay_ledger()` call. Fixing any one alone does not make the
+system multi-replica safe.
 
 ---
 

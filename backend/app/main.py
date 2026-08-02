@@ -93,7 +93,11 @@ def create_app() -> FastAPI:
         allow_origins=settings.cors_origin_list,
         allow_credentials=True,
         allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
-        allow_headers=["Authorization", "Content-Type", "X-API-Key"],
+        # X-Upload-Ticket is what a browser presents when it posts a large deck
+        # directly here, bypassing a serverless proxy that would reject the
+        # body outright. Without it in the allow list the preflight fails and
+        # only small uploads work. See app.core.upload_tickets.
+        allow_headers=["Authorization", "Content-Type", "X-API-Key", "X-Upload-Ticket"],
         expose_headers=["X-Request-ID"],
         max_age=600,
     )

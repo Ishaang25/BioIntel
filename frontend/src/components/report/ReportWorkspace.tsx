@@ -1,25 +1,32 @@
 'use client';
 
 import Link from 'next/link';
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-import { BAND_LABEL, buildReportModel, recommendationLabel, recommendationTone } from '@/lib/report-model';
+import {
+  BAND_LABEL,
+  buildReportModel,
+  recommendationLabel,
+  recommendationTone,
+} from '@/lib/report-model';
 import type { ReportInput, ReportModel } from '@/lib/report-model';
 import { Badge, Callout, cx, toneClasses } from '@/components/ui/primitives';
 import { ClaimDrawer } from './ClaimDrawer';
 import { CitationPopover, type CitationAnchor } from './CitationPopover';
 import { ExportMenu } from './ExportMenu';
-import { ReportProvider, type ClaimFilter, type ReportContextValue } from './context';
-import { ReportRail, ReportStrip, useScrollSpy, type NavSection } from './ReportSidebar';
+import { ReportProvider, useReport, type ClaimFilter, type ReportContextValue } from './context';
+import { ReportNav, type NavCounts } from './ReportNav';
+import { viewDef, viewForSection, viewFromHash, type ViewId } from './navigation';
 import { AnalysisSection } from './sections/Analysis';
 import { AppendixSection } from './sections/Appendix';
 import { ClaimsSection, type ClaimFilterRequest } from './sections/Claims';
 import { EvidenceSection } from './sections/Evidence';
 import { ExecutiveSummarySection } from './sections/ExecutiveSummary';
-import { OverviewSection } from './sections/Overview';
+import { AtAGlanceSection, ExploreSection } from './sections/Explore';
 import { QuestionsSection } from './sections/Questions';
 import { RisksSection } from './sections/Risks';
 import { ScoreBreakdownSection } from './sections/ScoreBreakdown';
+import { VerdictSection } from './sections/Verdict';
 
 const HOVER_CLOSE_DELAY = 140;
 
@@ -31,10 +38,16 @@ const HOVER_CLOSE_DELAY = 140;
  * — a chart segment filtering the claim table, a citation opening a claim, a
  * risk tracing back to its source — is coordinated at this level so no section
  * needs to know about any other.
+ *
+ * The report is split into views rather than stacked into one scroll (see
+ * `./navigation`). That changes one thing for the sections: `goToSection` may
+ * now have to switch view before it can scroll, so the scroll waits a frame for
+ * the target to exist. Everything else about them is unchanged.
  */
 export function ReportWorkspace(props: ReportInput) {
   const model = useMemo(() => buildReportModel(props), [props]);
 
+  const [view, setView] = useState<ViewId>('summary');
   const [activeClaimId, setActiveClaimId] = useState<string | null>(null);
   const [citation, setCitation] = useState<CitationAnchor | null>(null);
   const [claimFilter, setClaimFilter] = useState<ClaimFilterRequest>({ token: 0 });
@@ -47,9 +60,65 @@ export function ReportWorkspace(props: ReportInput) {
     }
   };
 
-  const goToSection = useCallback((sectionId: string) => {
-    document.getElementById(sectionId)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  /**
+   * The current view, readable synchronously.
+   *
+   * `selectView` needs to know whether the view is actually changing in order
+   * to decide whether to reset the scroll position, and that decision cannot
+   * live inside the state updater: React may run an updater more than once,
+   * and scrolling the window is not something to do twice.
+   */
+  const viewRef = useRef<ViewId>('summary');
+
+  const selectView = useCallback((next: ViewId, { resetScroll = true } = {}) => {
+    const changed = viewRef.current !== next;
+    viewRef.current = next;
+    setView(next);
+
+    // A view is a place, so it belongs in the URL: a link to the claim
+    // explorer reopens the claim explorer. `replaceState` rather than a push,
+    // because tabbing through views is browsing one document, not visiting
+    // eight pages — Back should leave the report, not walk the tab history.
+    if (window.location.hash !== `#${next}`) {
+      window.history.replaceState(null, '', `#${next}`);
+    }
+    // Landing halfway down a view the reader has not seen before is
+    // disorienting, so a newly opened view starts at its top — unless the
+    // caller is about to scroll to a specific section inside it.
+    if (changed && resetScroll) window.scrollTo({ top: 0, behavior: 'auto' });
   }, []);
+
+  // Honour the fragment on arrival, and follow it if the reader edits it or
+  // uses a link that only changes the hash.
+  useEffect(() => {
+    const apply = () => {
+      const next = viewFromHash(window.location.hash);
+      if (next && next !== viewRef.current) {
+        viewRef.current = next;
+        setView(next);
+      }
+    };
+    apply();
+    window.addEventListener('hashchange', apply);
+    return () => window.removeEventListener('hashchange', apply);
+  }, []);
+
+  /**
+   * Reveals a section wherever it now lives.
+   *
+   * Sections keep the ids they always had, so every existing caller works
+   * unchanged; the only addition is switching to the owning view first and
+   * waiting a frame for the element to mount before scrolling to it.
+   */
+  const goToSection = useCallback(
+    (sectionId: string) => {
+      selectView(viewForSection(sectionId), { resetScroll: false });
+      requestAnimationFrame(() => {
+        document.getElementById(sectionId)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+    },
+    [selectView],
+  );
 
   const openClaim = useCallback(
     (claimId: string) => {
@@ -82,7 +151,7 @@ export function ReportWorkspace(props: ReportInput) {
   const filterClaims = useCallback(
     (filter: ClaimFilter) => {
       setClaimFilter((current) => ({ token: current.token + 1, ...filter }));
-      requestAnimationFrame(() => goToSection('claims'));
+      goToSection('claims');
     },
     [goToSection],
   );
@@ -100,23 +169,16 @@ export function ReportWorkspace(props: ReportInput) {
     [model, openClaim, openCitation, closeCitation, goToSection, filterClaims],
   );
 
-  const sections: NavSection[] = useMemo(
-    () => [
-      { id: 'overview', label: 'Overview' },
-      { id: 'summary', label: 'Executive summary' },
-      { id: 'score', label: 'Score breakdown' },
-      { id: 'analysis', label: 'Analysis', count: model.sections.length },
-      { id: 'risks', label: 'Risks', count: model.risks.length },
-      { id: 'claims', label: 'Claims', count: model.claims.length },
-      { id: 'evidence', label: 'Evidence', count: model.evidence.length },
-      { id: 'questions', label: 'Management questions', count: model.questions.length },
-      { id: 'appendix', label: 'Appendix' },
-    ],
+  const counts = useMemo<NavCounts>(
+    () => ({
+      sections: model.sections.length,
+      risks: model.risks.length,
+      claims: model.claims.length,
+      evidence: model.evidence.length,
+      questions: model.questions.length,
+    }),
     [model],
   );
-
-  const sectionIds = useMemo(() => sections.map((section) => section.id), [sections]);
-  const activeSection = useScrollSpy(sectionIds);
 
   const activeClaim = activeClaimId ? (model.claimsById.get(activeClaimId) ?? null) : null;
   const citationEntry = citation ? model.citationsByRef.get(citation.ref) : undefined;
@@ -127,42 +189,56 @@ export function ReportWorkspace(props: ReportInput) {
   return (
     <ReportProvider value={context}>
       <ReportTitleBar model={model} />
-      <ReportStrip sections={sections} active={activeSection} onNavigate={goToSection} />
+      <ReportNav active={view} counts={counts} onSelect={(next) => selectView(next)} />
 
-      <div className="mx-auto w-full max-w-[1600px] px-6 pb-24 pt-6">
-        <div className="flex gap-8">
-          <ReportRail sections={sections} active={activeSection} onNavigate={goToSection} />
+      <div
+        role="tabpanel"
+        id={`report-panel-${view}`}
+        aria-labelledby={`report-tab-${view}`}
+        tabIndex={-1}
+        className="mx-auto w-full max-w-[1600px] px-4 pb-24 pt-6 sm:px-6"
+      >
+        <div className="space-y-8">
+          {model.unavailable.length > 0 && (
+            <Callout tone="warn" title="Part of this report could not be loaded">
+              The {model.unavailable.join(', ')}{' '}
+              {model.unavailable.length === 1 ? 'endpoint' : 'endpoints'} did not respond, so
+              {model.unavailable.length === 1 ? ' that section is' : ' those sections are'} empty
+              below. This is a loading failure, not a finding — the analysis itself completed.
+              Reload to try again.
+            </Callout>
+          )}
 
-          <div className="min-w-0 flex-1 space-y-10">
-            {model.unavailable.length > 0 && (
-              <Callout tone="warn" title="Part of this report could not be loaded">
-                The {model.unavailable.join(', ')}{' '}
-                {model.unavailable.length === 1 ? 'endpoint' : 'endpoints'} did not respond, so
-                {model.unavailable.length === 1 ? ' that section is' : ' those sections are'} empty
-                below. This is a loading failure, not a finding — the analysis itself completed.
-                Reload to try again.
-              </Callout>
-            )}
+          {model.degraded && (
+            <Callout tone="warn" title="Degraded analysis">
+              This run was produced without a language-model provider. Claims and evidence were
+              matched by deterministic lexical rules; figures were not interpreted and evidence was
+              not semantically adjudicated. Re-run with a provider configured before relying on
+              this.
+            </Callout>
+          )}
 
-            {model.degraded && (
-              <Callout tone="warn" title="Degraded analysis">
-                This run was produced without a language-model provider. Claims and evidence were
-                matched by deterministic lexical rules; figures were not interpreted and evidence
-                was not semantically adjudicated. Re-run with a provider configured before relying
-                on this.
-              </Callout>
-            )}
+          {view === 'summary' && (
+            <>
+              <VerdictSection />
+              <ExecutiveSummarySection />
+              <ExploreSection />
+              <AtAGlanceSection />
+            </>
+          )}
 
-            <OverviewSection />
-            <ExecutiveSummarySection />
-            <ScoreBreakdownSection />
-            <AnalysisSection />
-            <RisksSection />
-            <ClaimsSection request={claimFilter} />
-            <EvidenceSection />
-            <QuestionsSection />
-            <AppendixSection />
-          </div>
+          {view !== 'summary' && <ViewIntro view={view} />}
+
+          {view === 'score' && <ScoreBreakdownSection />}
+          {view === 'analysis' && <AnalysisSection />}
+          {view === 'risks' && <RisksSection />}
+          {/* Mounted only while selected: the claim table is virtualised over
+              every claim in the deck, and the appendix renders one tab at a
+              time. Neither should cost anything on the summary. */}
+          {view === 'claims' && <ClaimsSection request={claimFilter} />}
+          {view === 'evidence' && <EvidenceSection />}
+          {view === 'questions' && <QuestionsSection />}
+          {view === 'appendix' && <AppendixSection />}
         </div>
       </div>
 
@@ -188,6 +264,30 @@ export function ReportWorkspace(props: ReportInput) {
 }
 
 /**
+ * A one-line orientation at the top of every deep-dive view, plus the way back.
+ *
+ * Arriving in the claim explorer from a chart segment is otherwise a jump with
+ * no context: the reader needs to know where they are and how to get back to
+ * the answer without hunting for it.
+ */
+function ViewIntro({ view }: { view: ViewId }) {
+  const { goToSection } = useReport();
+  const def = viewDef(view);
+  return (
+    <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 border-b border-line pb-3">
+      <p className="text-[13px] text-fg-2">{def.blurb}</p>
+      <button
+        type="button"
+        onClick={() => goToSection('verdict')}
+        className="text-[13px] text-fg-3 underline decoration-line-strong underline-offset-2 transition-colors hover:text-fg"
+      >
+        ← Back to the summary
+      </button>
+    </div>
+  );
+}
+
+/**
  * The persistent context bar: which company, what the answer was, and how to
  * take it away. Stays visible while the reader moves through the report.
  */
@@ -196,11 +296,11 @@ function ReportTitleBar({ model }: { model: ReportModel }) {
 
   return (
     <div className="sticky top-0 z-30 border-b border-line bg-canvas/85 backdrop-blur">
-      <div className="mx-auto flex min-h-14 w-full max-w-[1600px] flex-wrap items-center gap-x-4 gap-y-2 px-6 py-2">
+      <div className="mx-auto flex min-h-14 w-full max-w-[1600px] flex-wrap items-center gap-x-4 gap-y-2 px-4 py-2 sm:px-6">
         <div className="flex min-w-0 flex-1 items-center gap-3">
           <Link
             href={`/documents/${model.documentId}`}
-            className="shrink-0 text-fg-3 transition-colors hover:text-fg"
+            className="shrink-0 rounded text-fg-3 transition-colors hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-fg/30"
             aria-label="Back to the document"
           >
             <svg width="15" height="15" viewBox="0 0 16 16" aria-hidden>

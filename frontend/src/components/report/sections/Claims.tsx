@@ -128,6 +128,15 @@ export function ClaimsSection({ request }: { request: ClaimFilterRequest }) {
     scrollRef.current?.scrollTo({ top: 0 });
   }, [query, type, category, state, severity, criticalOnly]);
 
+  const clearFilters = useCallback(() => {
+    setQuery('');
+    setType('all');
+    setCategory('all');
+    setState('all');
+    setSeverity('all');
+    setCriticalOnly(false);
+  }, []);
+
   const onSort = useCallback(
     (key: SortKey) => {
       if (key === sort) setDirection((value) => (value === 'asc' ? 'desc' : 'asc'));
@@ -302,12 +311,30 @@ export function ClaimsSection({ request }: { request: ClaimFilterRequest }) {
           </div>
 
           {rows.length === 0 ? (
-            <div className="px-4 py-16 text-center">
-              <p className="text-sm font-medium text-fg">No claims match these filters</p>
-              <p className="mt-1 text-[13px] text-fg-2">
-                Widen the evidence state or clear the search to see the rest.
-              </p>
-            </div>
+            /* Two different situations that used to read as one. "Nothing
+               matched your filter" is the reader's doing and is fixed by a
+               click; "the deck yielded no claims" is a finding about the run
+               and no filter change will help. */
+            model.claims.length === 0 ? (
+              <div className="px-4 py-16 text-center">
+                <p className="text-sm font-medium text-fg">No claims were extracted</p>
+                <p className="mx-auto mt-1 max-w-md text-[13px] leading-relaxed text-fg-2">
+                  The extraction stage found nothing it could anchor to a page. That usually means
+                  the deck is mostly imagery with little asserted science, or the parse recovered
+                  very little text — the Appendix records what was read.
+                </p>
+              </div>
+            ) : (
+              <div className="px-4 py-16 text-center">
+                <p className="text-sm font-medium text-fg">No claims match these filters</p>
+                <p className="mt-1 text-[13px] text-fg-2">
+                  {model.claims.length} claims were extracted; none of them match.
+                </p>
+                <button type="button" className="btn btn-sm btn-secondary mt-3" onClick={clearFilters}>
+                  Clear all filters
+                </button>
+              </div>
+            )
           ) : (
             <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
               {virtualizer.getVirtualItems().map((item) => {

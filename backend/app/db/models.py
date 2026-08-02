@@ -173,6 +173,10 @@ class AnalysisRun(Base, TimestampMixin):
         EnumType(PipelineStage, 48), nullable=True
     )
     progress: Mapped[float] = mapped_column(Float, default=0.0)
+    #: Short description of the sub-step in flight, for display only. A stage
+    #: name alone cannot distinguish "writing the memo" from "hung", and the
+    #: report stage is one unit of work that runs for minutes.
+    current_activity: Mapped[str | None] = mapped_column(String(160), nullable=True)
 
     started_at: Mapped[dt.datetime | None] = mapped_column(UTCDateTime, nullable=True)
     finished_at: Mapped[dt.datetime | None] = mapped_column(UTCDateTime, nullable=True)

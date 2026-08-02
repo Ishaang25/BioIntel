@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.errors import RateLimited, Unauthorized
 from app.core.logging import get_logger
+from app.core.upload_tickets import redeem_ticket
 from app.db.session import get_db
 
 log = get_logger(__name__)
@@ -27,10 +28,28 @@ class Principal:
 
     key_id: str
     is_anonymous: bool = False
+    #: True when `key_id` names the *authentication method* rather than the
+    #: caller, so every caller using it collapses onto one value. An upload
+    #: ticket is deliberately anonymous by design -- it carries no identity, it
+    #: carries permission -- which makes `key_id` useless as a rate-limit key.
+    is_shared: bool = False
 
     @property
     def label(self) -> str:
         return "anonymous" if self.is_anonymous else self.key_id
+
+    def rate_limit_identity(self, request: Request) -> str:
+        """What to count requests against.
+
+        An API key identifies its holder, so it is its own bucket. Anonymous
+        and ticket-bearing callers do not identify themselves at all; counting
+        them under a shared constant would give every such caller in the world
+        one bucket between them, where a single busy user exhausts the limit
+        for everyone. The client address is the closest available identity.
+        """
+        if (self.is_anonymous or self.is_shared) and request.client:
+            return request.client.host
+        return self.key_id
 
 
 def _key_id(api_key: str) -> str:
@@ -68,6 +87,49 @@ async def require_principal(
 CurrentPrincipal = Annotated[Principal, Depends(require_principal)]
 
 
+async def require_upload_principal(
+    request: Request,
+    x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
+    authorization: Annotated[str | None, Header()] = None,
+    x_upload_ticket: Annotated[str | None, Header(alias="X-Upload-Ticket")] = None,
+) -> Principal:
+    """Authenticate an upload by API key *or* by a signed upload ticket.
+
+    A browser cannot hold the API key, and on a serverless host it cannot send
+    a large file through the key-holding proxy either -- the platform caps the
+    body long before our code sees it.  A ticket is the narrow credential that
+    lets the browser post the file straight here; see
+    :mod:`app.core.upload_tickets`.
+
+    The key path is unchanged, so every existing client -- the proxy, the CLI,
+    the tests -- behaves exactly as before.
+
+    The result is memoised on the request.  A ticket is single-use, and this
+    dependency is resolved both by the route and by its rate limiter; relying
+    on FastAPI's per-request dependency cache to make that one redemption
+    rather than two would be a correctness bug waiting on an implementation
+    detail.
+    """
+    cached = getattr(request.state, "upload_principal", None)
+    if cached is not None:
+        return cached
+
+    if x_upload_ticket:
+        redeem_ticket(x_upload_ticket)
+        # `is_shared`: every ticket bearer presents this same key_id, so it
+        # names the door they came through, not who they are. Uploads are
+        # counted per client address instead -- see `rate_limit_identity`.
+        principal = Principal(key_id="upload_ticket", is_shared=True)
+    else:
+        principal = await require_principal(x_api_key=x_api_key, authorization=authorization)
+
+    request.state.upload_principal = principal
+    return principal
+
+
+UploadPrincipal = Annotated[Principal, Depends(require_upload_principal)]
+
+
 class SlidingWindowLimiter:
     """In-process sliding-window rate limiter.
 
@@ -102,18 +164,18 @@ _limiter = SlidingWindowLimiter()
 
 
 def rate_limit(request: Request, principal: CurrentPrincipal) -> None:
-    identity = principal.key_id
-    if principal.is_anonymous and request.client:
-        identity = request.client.host
-    _limiter.check(f"api:{identity}", limit=settings.rate_limit_per_minute, window_seconds=60.0)
-
-
-def upload_rate_limit(request: Request, principal: CurrentPrincipal) -> None:
-    identity = principal.key_id
-    if principal.is_anonymous and request.client:
-        identity = request.client.host
     _limiter.check(
-        f"upload:{identity}", limit=settings.upload_rate_limit_per_hour, window_seconds=3600.0
+        f"api:{principal.rate_limit_identity(request)}",
+        limit=settings.rate_limit_per_minute,
+        window_seconds=60.0,
+    )
+
+
+def upload_rate_limit(request: Request, principal: UploadPrincipal) -> None:
+    _limiter.check(
+        f"upload:{principal.rate_limit_identity(request)}",
+        limit=settings.upload_rate_limit_per_hour,
+        window_seconds=3600.0,
     )
 
 

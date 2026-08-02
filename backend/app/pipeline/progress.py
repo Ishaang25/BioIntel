@@ -33,16 +33,28 @@ MIN_DELTA = 0.005
 MIN_INTERVAL_SECONDS = 1.0
 
 
+#: Longest activity description we will persist. Matches the column width.
+MAX_ACTIVITY_CHARS = 160
+
+
 class ProgressSink(Protocol):
     """Persists a run's progress. Kept abstract so tests need no database."""
 
-    def __call__(self, run_id: str, stage: PipelineStage, progress: float) -> None: ...
+    def __call__(
+        self,
+        run_id: str,
+        stage: PipelineStage,
+        progress: float,
+        activity: str | None = None,
+    ) -> None: ...
 
 
 class ProgressReporter(Protocol):
     """What a stage sees: somewhere to say how far through it is."""
 
-    def advance(self, stage: PipelineStage, completed: int, total: int) -> None: ...
+    def advance(
+        self, stage: PipelineStage, completed: int, total: int, activity: str | None = None
+    ) -> None: ...
 
 
 class StageProgress:
@@ -60,30 +72,44 @@ class StageProgress:
         self._lock = threading.Lock()
         self._last_written = -1.0
         self._last_time = 0.0
+        self._last_activity: str | None = None
 
-    def advance(self, stage: PipelineStage, completed: int, total: int) -> None:
-        """Record `completed` of `total` items done within `stage`."""
+    def advance(
+        self, stage: PipelineStage, completed: int, total: int, activity: str | None = None
+    ) -> None:
+        """Record `completed` of `total` items done within `stage`.
+
+        `activity` is a short description of what is happening right now, shown
+        verbatim to the person watching. A stage that changes what it is doing
+        without moving the bar much -- the report stage, whose steps are five
+        different pieces of writing -- passes a new one each time and bypasses
+        the delta throttle, because the words are the information there, not
+        the number.
+        """
         if total <= 0:
             return
 
         fraction = min(1.0, max(0.0, completed / total))
         start = self._base if self._base is not None else stage_start(stage)
         overall = round(start + STAGE_WEIGHTS.get(stage, 0.0) * fraction, 4)
+        note = activity[:MAX_ACTIVITY_CHARS] if activity else None
 
         now = time.monotonic()
         with self._lock:
             moved_enough = overall - self._last_written >= MIN_DELTA
             waited_enough = now - self._last_time >= MIN_INTERVAL_SECONDS
             complete = completed >= total
+            changed_activity = note is not None and note != self._last_activity
             # Always write the final tick: the last item of a long stage is the
             # one the reader is waiting on.
-            if not complete and not (moved_enough and waited_enough):
+            if not complete and not changed_activity and not (moved_enough and waited_enough):
                 return
             self._last_written = overall
             self._last_time = now
+            self._last_activity = note
 
         try:
-            self._sink(self._run_id, stage, overall)
+            self._sink(self._run_id, stage, overall, note)
         except Exception:  # pragma: no cover - progress must never fail a run
             log.warning("progress.write_failed", stage=stage.value, exc_info=True)
 
@@ -101,5 +127,7 @@ def stage_start(stage: PipelineStage) -> float:
 class NullProgress:
     """No-op reporter, for code paths with no run to report against."""
 
-    def advance(self, stage: PipelineStage, completed: int, total: int) -> None:
+    def advance(
+        self, stage: PipelineStage, completed: int, total: int, activity: str | None = None
+    ) -> None:
         return

@@ -43,6 +43,17 @@ services:
       - key: DATABASE_URL
         sync: false
 
+      # The frontend's origin, e.g. https://biointel.vercel.app.
+      #
+      # Required, not cosmetic: a Vercel Serverless Function may receive at
+      # most 4.5 MB of request body on any plan, so a deck above that cannot
+      # reach this API through the frontend's proxy. The browser posts those
+      # straight here instead (see app/core/upload_tickets.py), which is a
+      # cross-origin request. If this does not list the frontend's origin,
+      # every upload over ~4 MB fails with an opaque browser network error.
+      - key: CORS_ORIGINS
+        sync: false
+
       # Without a key the pipeline falls back to its deterministic offline
       # analyser and every report is marked degraded. It still runs.
       - key: OPENAI_API_KEY

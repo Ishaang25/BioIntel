@@ -4,14 +4,22 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, Form, Query, Response, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, Query, Request, Response, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy import func, select
 
-from app.api.deps import CurrentPrincipal, DbSession, PaginationDep, rate_limit, upload_rate_limit
+from app.api.deps import (
+    CurrentPrincipal,
+    DbSession,
+    PaginationDep,
+    UploadPrincipal,
+    rate_limit,
+    upload_rate_limit,
+)
 from app.core.config import settings
 from app.core.errors import DocumentTooLarge, NotFound
 from app.core.logging import get_logger
+from app.core.upload_tickets import issue_ticket
 from app.db.models import AnalysisRun, DocumentPage
 from app.schemas.api import (
     DocumentDetailOut,
@@ -20,6 +28,7 @@ from app.schemas.api import (
     PageOut,
     RunOut,
     UploadResponse,
+    UploadTicketOut,
 )
 from app.services import documents as document_service
 from app.services import runs as run_service
@@ -37,13 +46,21 @@ router = APIRouter(prefix="/documents", tags=["documents"])
     summary="Upload a pitch deck",
 )
 async def upload_document(
+    request: Request,
     session: DbSession,
-    principal: CurrentPrincipal,
+    principal: UploadPrincipal,
     file: Annotated[UploadFile, File(description="The pitch deck as a PDF.")],
     notes: Annotated[str | None, Form()] = None,
     analyze: Annotated[bool, Form()] = True,
 ) -> UploadResponse:
-    """Store a PDF and, unless told otherwise, immediately queue its analysis."""
+    """Store a PDF and, unless told otherwise, immediately queue its analysis.
+
+    Accepts either an API key or a single-use ``X-Upload-Ticket`` (see
+    :func:`app.api.deps.require_upload_principal`), which is how the browser
+    reaches this endpoint without routing a large body through a serverless
+    proxy that would reject it.
+    """
+    _reject_oversized_body(request)
     data = await _read_upload(file)
 
     document, created = document_service.store_document(
@@ -64,6 +81,58 @@ async def upload_document(
         created=created,
         run=RunOut.model_validate(run) if run else None,
     )
+
+
+@router.post(
+    "/upload-ticket",
+    response_model=UploadTicketOut,
+    dependencies=[Depends(rate_limit)],
+    summary="Mint a single-use ticket for a direct browser upload",
+)
+def create_upload_ticket(principal: CurrentPrincipal) -> UploadTicketOut:
+    """Issue a short-lived credential authorising one direct upload.
+
+    Called server-to-server by a frontend that holds the API key, on behalf of
+    a browser that must not.  The browser then posts the file straight here
+    with ``X-Upload-Ticket``, bypassing a serverless proxy whose request-body
+    ceiling is lower than this API's own upload limit.
+    """
+    ticket = issue_ticket()
+    return UploadTicketOut(
+        token=ticket.token,
+        expires_in_seconds=ticket.ttl_seconds,
+        max_bytes=ticket.max_bytes,
+    )
+
+
+#: A multipart body carries the file plus boundaries, field names and the
+#: notes field. Comparing the whole body against the file limit would reject a
+#: file that is legitimately just under it, so allow a little slack here and
+#: let the per-file check in `_read_upload` be the exact one.
+_MULTIPART_OVERHEAD_ALLOWANCE = 64 * 1024
+
+
+def _reject_oversized_body(request: Request) -> None:
+    """Fail an over-limit upload on its declared length, before reading it.
+
+    Streaming already enforces the ceiling, but only after the client has sent
+    everything up to it.  A declared ``Content-Length`` is enough to answer
+    immediately, which turns a minute of wasted upload into a fast, specific
+    error the UI can act on.
+    """
+    raw = request.headers.get("content-length")
+    if raw is None:
+        return
+    try:
+        declared = int(raw)
+    except ValueError:
+        return
+    if declared > settings.max_upload_bytes + _MULTIPART_OVERHEAD_ALLOWANCE:
+        raise DocumentTooLarge(
+            f"The upload is {declared / 1_048_576:.1f} MB; the limit is "
+            f"{settings.max_upload_mb} MB.",
+            detail={"limit_bytes": settings.max_upload_bytes, "declared_bytes": declared},
+        )
 
 
 async def _read_upload(file: UploadFile) -> bytes:

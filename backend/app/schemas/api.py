@@ -90,6 +90,19 @@ class UploadResponse(ApiModel):
     run: RunOut | None = None
 
 
+class UploadTicketOut(ApiModel):
+    """A single-use credential for uploading one document straight to the API.
+
+    See :mod:`app.core.upload_tickets`. ``max_bytes`` is echoed so a client
+    can enforce the same ceiling before spending a minute sending a file that
+    would be rejected on arrival.
+    """
+
+    token: str
+    expires_in_seconds: int
+    max_bytes: int
+
+
 # ==================================================================== runs ===
 class StageOut(ApiModel):
     stage: PipelineStage
@@ -108,6 +121,9 @@ class RunOut(ApiModel):
     status: RunStatus
     current_stage: PipelineStage | None = None
     progress: float
+    #: Human-readable description of the sub-step in flight, when the running
+    #: stage has one. Display only; absent for stages that report as a unit.
+    current_activity: str | None = None
     started_at: dt.datetime | None = None
     finished_at: dt.datetime | None = None
     duration_ms: int | None = None
@@ -115,6 +131,12 @@ class RunOut(ApiModel):
     error_message: str | None = None
     pipeline_version: str
     created_at: dt.datetime
+    #: Filename of the analysed document, populated on list responses so a
+    #: caller can name a run without a second request per row. Absent
+    #: elsewhere; ``document_id`` remains the identifier.
+    document_filename: str | None = None
+    #: Company the run identified, once the profile stage has run.
+    company_name: str | None = None
 
 
 class RunDetailOut(RunOut):

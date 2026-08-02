@@ -1264,16 +1264,24 @@ class AnalysisPipeline:
         # the whole of it and the run looks hung. Step 3 is the long one; the
         # tick before it is what tells a reader the memo is being written
         # rather than that something has stopped.
+        #
+        # Each tick also names what is being written. A number that barely
+        # moves for two minutes reads as stuck no matter how accurate it is;
+        # the words are what make the wait legible.
         steps = 5
-        context.progress.advance(PipelineStage.REPORT, 0, steps)
+        context.progress.advance(
+            PipelineStage.REPORT, 0, steps, "Weighing the evidence behind each claim"
+        )
 
         await self._scientific_assessment(context)
-        context.progress.advance(PipelineStage.REPORT, 1, steps)
+        context.progress.advance(PipelineStage.REPORT, 1, steps, "Assembling the reference list")
 
         summaries, _ = _claim_summaries(context)
         references = _build_references(context, summaries)
         context.references = references
-        context.progress.advance(PipelineStage.REPORT, 2, steps)
+        context.progress.advance(
+            PipelineStage.REPORT, 2, steps, "Writing the executive summary and memo sections"
+        )
 
         overall = context.overall or OverallScore(
             score=0.0, band=_default_band(), confidence=0.0, breakdown={}
@@ -1294,7 +1302,7 @@ class AnalysisPipeline:
             scientific_assessment=context.scientific_assessment,
         )
         context.report = report
-        context.progress.advance(PipelineStage.REPORT, 3, steps)
+        context.progress.advance(PipelineStage.REPORT, 3, steps, "Formatting the final report")
 
         markdown = render_markdown(
             report,
@@ -1331,7 +1339,7 @@ class AnalysisPipeline:
                 )
             )
 
-        context.progress.advance(PipelineStage.REPORT, steps, steps)
+        context.progress.advance(PipelineStage.REPORT, steps, steps, "Saving the report")
 
         context.record(
             PipelineStage.REPORT,
@@ -1788,13 +1796,19 @@ def _update_stage(
             row.metrics = metrics
 
 
-def _update_run_stage(run_id: str, stage: PipelineStage, progress: float) -> None:
+def _update_run_stage(
+    run_id: str, stage: PipelineStage, progress: float, activity: str | None = None
+) -> None:
     with session_scope() as session:
         run = session.get(AnalysisRun, run_id)
         if run is None:
             return
         run.current_stage = stage
         run.progress = round(min(1.0, max(run.progress, progress)), 4)
+        # Cleared on entering a stage that has nothing to say, so a description
+        # from the previous stage can never linger and misreport what is
+        # happening now.
+        run.current_activity = activity
 
 
 def _mark_finished(run_id: str, context: RunContext, llm: LLMClient) -> None:
@@ -1805,6 +1819,9 @@ def _mark_finished(run_id: str, context: RunContext, llm: LLMClient) -> None:
         run.status = RunStatus.SUCCEEDED
         run.progress = 1.0
         run.current_stage = PipelineStage.REPORT
+        # A settled run is doing nothing; leaving the last sub-step on screen
+        # would read as still working.
+        run.current_activity = None
         run.finished_at = dt.datetime.now(dt.UTC)
         run.duration_ms = _elapsed_ms(context.started_at)
         run.metrics = _run_metrics(context, llm)
@@ -1823,6 +1840,7 @@ def _mark_failed(
         run.status = RunStatus.FAILED
         run.finished_at = dt.datetime.now(dt.UTC)
         run.duration_ms = _elapsed_ms(context.started_at)
+        run.current_activity = None
         run.error_code = code[:64]
         run.error_message = message
         if llm is not None:

@@ -20,7 +20,6 @@ import type {
   Risk,
   Run,
   RunDetail,
-  UploadResponse,
 } from './types';
 
 const SERVER_BASE = process.env.BIOINTEL_API_URL ?? 'http://127.0.0.1:8000';
@@ -49,8 +48,6 @@ export class ApiRequestError extends Error {
  */
 const DEFAULT_TIMEOUT_MS = 12_000;
 
-/** Uploads carry up to 50 MB and are the one call worth waiting on. */
-const UPLOAD_TIMEOUT_MS = 120_000;
 
 export interface RequestOptions extends RequestInit {
   /** Seconds; omit for the Next.js default. */
@@ -120,19 +117,6 @@ export const api = {
   getDocument: (id: string) => request<DocumentDetail>(`/documents/${id}`),
 
   deleteDocument: (id: string) => request<void>(`/documents/${id}`, { method: 'DELETE' }),
-
-  uploadDocument: async (file: File, notes: string, analyze: boolean): Promise<UploadResponse> => {
-    const form = new FormData();
-    form.append('file', file);
-    if (notes) form.append('notes', notes);
-    form.append('analyze', String(analyze));
-    // Let the browser set the multipart boundary.
-    return request<UploadResponse>('/documents', {
-      method: 'POST',
-      body: form,
-      timeoutMs: UPLOAD_TIMEOUT_MS,
-    });
-  },
 
   listRuns: (limit = 50, offset = 0) =>
     request<Paginated<Run>>(`/runs?limit=${limit}&offset=${offset}`),

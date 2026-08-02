@@ -132,6 +132,11 @@ export interface Run {
   document_id: string;
   status: RunStatus;
   current_stage: string | null;
+  /**
+   * What the running stage is doing right now, when it reports sub-steps.
+   * Optional: older runs and older API builds do not carry it.
+   */
+  current_activity?: string | null;
   progress: number;
   started_at: string | null;
   finished_at: string | null;
@@ -140,6 +145,9 @@ export interface Run {
   error_message: string | null;
   pipeline_version: string;
   created_at: string;
+  /** Present on list responses so a run can be named without a second call. */
+  document_filename?: string | null;
+  company_name?: string | null;
 }
 
 export interface RunDetail extends Run {
@@ -337,6 +345,7 @@ export interface ProgressEvent {
   run_id: string;
   status: RunStatus;
   current_stage: string | null;
+  current_activity?: string | null;
   progress: number;
   error_code: string | null;
   error_message: string | null;

@@ -5,6 +5,7 @@ import { StartRunButton } from '@/components/StartRunButton';
 import { Badge, Card, EmptyState, MetricCard, PageHeader } from '@/components/ui';
 import { api, ApiRequestError } from '@/lib/api';
 import { formatBytes, formatDate, formatDuration, humanise } from '@/lib/format';
+import { stageLabel } from '@/lib/run-progress';
 import type { DocumentDetail, Run, RunStatus } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
@@ -87,7 +88,7 @@ export default async function DocumentPage({
                 <tr>
                   <th className="w-[190px]">Started</th>
                   <th className="w-[140px]">Status</th>
-                  <th>Stage</th>
+                  <th>Step</th>
                   <th className="w-[110px]">Duration</th>
                   <th className="w-[90px]" />
                 </tr>
@@ -104,7 +105,9 @@ export default async function DocumentPage({
                         )}
                       </Badge>
                     </td>
-                    <td className="text-fg-2">{humanise(run.current_stage) || '—'}</td>
+                    <td className="text-fg-2">
+                      {run.current_stage ? stageLabel(run.current_stage) : '—'}
+                    </td>
                     <td className="num text-fg-2">{formatDuration(run.duration_ms)}</td>
                     <td className="text-right">
                       <Link

@@ -5,7 +5,7 @@ import { useState } from 'react';
 import { humanise } from '@/lib/format';
 import type { ConfidenceLevel, ReportSection } from '@/lib/types';
 import type { Tone } from '@/lib/report-model';
-import { Badge, Card, cx } from '@/components/ui/primitives';
+import { Badge, Card, EmptyState, cx } from '@/components/ui/primitives';
 import { useReport } from '../context';
 import { Prose } from '../Prose';
 import { Section } from './Section';
@@ -27,7 +27,19 @@ export function AnalysisSection() {
   const { model } = useReport();
   const [active, setActive] = useState<string | null>(null);
 
-  if (model.sections.length === 0) return null;
+  // Returning null was safe when this sat in a long scroll; it now has a tab of
+  // its own, and an empty tab tells the reader nothing about why.
+  if (model.sections.length === 0) {
+    return (
+      <Section id="analysis" title="Analysis">
+        <EmptyState
+          compact
+          title="The memo has no written sections"
+          description="The report stage produced a summary and a recommendation but no section prose. The claims, evidence and scorecard are unaffected — they are derived separately and remain complete."
+        />
+      </Section>
+    );
+  }
 
   return (
     <Section

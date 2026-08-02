@@ -21,6 +21,14 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en">
       <body className="min-h-screen">
+        {/* The report's tab bar sits between the header and the content, so a
+            keyboard reader would otherwise cross it on every page. */}
+        <a
+          href="#content"
+          className="sr-only focus:not-sr-only focus:absolute focus:left-3 focus:top-3 focus:z-50 focus:rounded-md focus:bg-panel focus:px-3 focus:py-2 focus:text-[13px] focus:text-fg focus:shadow-lg focus:ring-2 focus:ring-fg/30"
+        >
+          Skip to content
+        </a>
         <div className="flex min-h-screen flex-col">
           <header className="border-b border-line bg-panel">
             <div className="mx-auto flex h-12 w-full max-w-[1600px] items-center justify-between px-6">
@@ -53,7 +61,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             </div>
           </header>
 
-          <main className="flex-1">{children}</main>
+          <main id="content" className="flex-1">
+            {children}
+          </main>
 
           <footer className="border-t border-line py-5">
             <div className="mx-auto max-w-[1600px] px-6 text-2xs leading-relaxed text-fg-3">

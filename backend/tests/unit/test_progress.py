@@ -8,15 +8,28 @@ carries 18% of the weight and runs once per page of the deck.
 from __future__ import annotations
 
 from app.core.enums import STAGE_WEIGHTS, PipelineStage
-from app.pipeline.progress import MIN_INTERVAL_SECONDS, StageProgress, stage_start
+from app.pipeline.progress import (
+    MAX_ACTIVITY_CHARS,
+    MIN_INTERVAL_SECONDS,
+    StageProgress,
+    stage_start,
+)
 
 
 class Recorder:
     def __init__(self) -> None:
         self.writes: list[tuple[PipelineStage, float]] = []
+        self.activities: list[str | None] = []
 
-    def __call__(self, run_id: str, stage: PipelineStage, progress: float) -> None:
+    def __call__(
+        self,
+        run_id: str,
+        stage: PipelineStage,
+        progress: float,
+        activity: str | None = None,
+    ) -> None:
         self.writes.append((stage, progress))
+        self.activities.append(activity)
 
 
 def _reporter(sink: Recorder) -> StageProgress:
@@ -93,8 +106,47 @@ class TestStageProgress:
         assert sink.writes == []
 
     def test_a_failing_sink_never_breaks_the_run(self) -> None:
-        def explode(run_id: str, stage: PipelineStage, progress: float) -> None:
+        def explode(
+            run_id: str, stage: PipelineStage, progress: float, activity: str | None = None
+        ) -> None:
             raise RuntimeError("database is down")
 
         reporter = StageProgress("run_x", explode)
         reporter.advance(PipelineStage.PAGE_UNDERSTANDING, 1, 1)  # must not raise
+
+
+class TestActivity:
+    """The report stage runs for minutes as one unit; the words are the signal."""
+
+    def test_a_new_description_is_written_even_when_the_bar_barely_moves(self) -> None:
+        sink = Recorder()
+        reporter = StageProgress("run_x", sink)  # throttle fully active
+        stage = PipelineStage.REPORT
+
+        reporter.advance(stage, 0, 5, "Weighing the evidence")
+        reporter.advance(stage, 1, 5, "Assembling the reference list")
+        reporter.advance(stage, 2, 5, "Writing the executive summary")
+
+        assert sink.activities == [
+            "Weighing the evidence",
+            "Assembling the reference list",
+            "Writing the executive summary",
+        ]
+
+    def test_repeating_the_same_description_does_not_defeat_the_throttle(self) -> None:
+        sink = Recorder()
+        reporter = StageProgress("run_x", sink)
+        for page in range(1, 100):
+            reporter.advance(PipelineStage.PAGE_UNDERSTANDING, page, 200, "Reading pages")
+        assert len(sink.writes) <= 5, f"throttle leaked {len(sink.writes)} writes"
+
+    def test_a_long_description_is_truncated_to_the_column_width(self) -> None:
+        sink = Recorder()
+        _reporter(sink).advance(PipelineStage.REPORT, 1, 5, "x" * 500)
+        assert sink.activities[-1] is not None
+        assert len(sink.activities[-1]) == MAX_ACTIVITY_CHARS
+
+    def test_omitting_a_description_reports_none(self) -> None:
+        sink = Recorder()
+        _reporter(sink).advance(PipelineStage.PARSE, 1, 1)
+        assert sink.activities == [None]

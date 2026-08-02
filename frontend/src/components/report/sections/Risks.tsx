@@ -86,11 +86,21 @@ export function RisksSection() {
       </div>
 
       {visible.length === 0 ? (
-        <EmptyState
-          compact
-          title="No findings at this severity"
-          description="Change the filter to see the rest of the findings."
-        />
+        /* "Nothing matched the filter" and "the analysis raised nothing" are
+           different statements, and only one of them is about the company. */
+        model.risks.length === 0 ? (
+          <EmptyState
+            compact
+            title="No findings were raised"
+            description="Neither the deterministic checks nor the claim-level assessment flagged anything. That is an absence of red flags, not a clean bill of health — the Evidence view shows how much of the deck could be checked at all."
+          />
+        ) : (
+          <EmptyState
+            compact
+            title="No findings at this severity"
+            description="Change the filter to see the rest of the findings."
+          />
+        )
       ) : (
         <ul className="grid gap-3 xl:grid-cols-2">
           {visible.map((card) => (

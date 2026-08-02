@@ -196,6 +196,10 @@ class Settings(BaseSettings):
     secret_key: str = "dev-insecure-secret-change-me"
     rate_limit_per_minute: int = 60
     upload_rate_limit_per_hour: int = 30
+    #: Lifetime of a direct-upload ticket. Long enough to push a 50 MB deck
+    #: over a poor connection, short enough that a leaked token is worthless.
+    #: See app.core.upload_tickets for why the mechanism exists at all.
+    upload_ticket_ttl_seconds: int = 900
 
     # -------------------------------------------------------- validators ---
     @field_validator("storage_dir", mode="before")

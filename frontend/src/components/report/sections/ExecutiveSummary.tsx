@@ -13,9 +13,14 @@ import { Section } from './Section';
 /**
  * The memo's front page, rebuilt as structure rather than prose.
  *
- * Each block answers one question — what is this, what works, what does not,
- * what should we do, how much should we trust it — so a reader can stop after
- * any one of them and still have something complete.
+ * Each block answers one question — what is this, what works, what should we
+ * do, how much should we trust it — so a reader can stop after any one of them
+ * and still have something complete.
+ *
+ * The key risks used to sit here too, in a panel identical to the one on the
+ * verdict card directly above. Two copies of the same three findings on one
+ * screen reads as two different sets of findings; the risks now appear once,
+ * at the top, with the full list one click away.
  */
 export function ExecutiveSummarySection() {
   const { model, openClaim, goToSection } = useReport();
@@ -38,15 +43,8 @@ export function ExecutiveSummarySection() {
             empty="No scorecard driver rose to the level of a headline strength."
             highlights={model.keyStrengths}
             onSelect={openClaim}
-          />
-          <HighlightPanel
-            title="Key risks"
-            tone="crit"
-            empty="No critical or high-severity findings were raised."
-            highlights={model.keyRisks}
-            onSelect={openClaim}
             footer={
-              model.risks.length > model.keyRisks.length ? (
+              model.risks.length > 0 ? (
                 <button
                   type="button"
                   className="btn btn-sm btn-ghost -ml-2.5"
@@ -63,7 +61,7 @@ export function ExecutiveSummarySection() {
       <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,1.55fr)_minmax(0,1fr)]">
         <Card className="p-6">
           <div className="mb-3 flex flex-wrap items-center gap-2">
-            <h3 className="label">Investment recommendation</h3>
+            <h3 className="label">Why this recommendation</h3>
             <Badge tone={recommendationTone(model.recommendation)}>
               {recommendationLabel(model.recommendation)}
             </Badge>
