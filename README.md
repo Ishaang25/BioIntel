@@ -311,5 +311,4 @@ finished investment opinion. In particular:
 
 ## Licence
 
-
 Proprietary. All rights reserved.
